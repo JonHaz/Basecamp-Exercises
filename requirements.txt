@@ -10,6 +10,7 @@
 # latest compatible release. Verified June 2026 against anthropic 0.104.x.
 
 anthropic>=0.69            # every exercise — structured outputs, adaptive thinking, effort, batches
+ipykernel>=6               # notebook kernel
 
 # Day 1/03 Prompt Rescue · Day 2/02 Inference Optimization · archive/day2-03
 matplotlib>=3.7
