@@ -90,7 +90,7 @@ for _d in [_pl.Path.cwd().resolve(), *_pl.Path.cwd().resolve().parents]:
                     os.environ.setdefault("ANTHROPIC_API_KEY", _v)
         break
 
-client = Anthropic()
+client = Anthropic(timeout=60.0, max_retries=2)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -479,7 +479,7 @@ def _serialize(messages):
     return out
 
 
-def run_subagent(category, ticket_id, model, state):
+def run_subagent(category, ticket_id, model, state, trial_num=None):
     """Run one specialist on its own prompt + tools. Returns its writeup text."""
     category = (category or "").lower()
     if category not in SUBAGENT_BACKENDS:
@@ -488,10 +488,13 @@ def run_subagent(category, ticket_id, model, state):
     system = load_prompt(f"system-prompt-subagent-{category}.txt")
     tools = load_tools(f"subagent-{category}-tools.json")
     backend = SUBAGENT_BACKENDS[category]
+    label = f"{ticket_id}" + (f" trial {trial_num}" if trial_num else "")
 
     messages = [{"role": "user", "content": f"Category: {category}\nTicket: {ticket_id}"}]
 
-    for _ in range(SUBAGENT_MAX_TURNS):
+    for turn in range(SUBAGENT_MAX_TURNS):
+        print(f"    [{label}] specialist:{category} turn {turn + 1}/{SUBAGENT_MAX_TURNS}...",
+              flush=True)
         resp = client.messages.create(
             model=model, system=system, max_tokens=MAX_TOKENS, tools=tools, messages=messages,
         )
@@ -518,11 +521,12 @@ def run_subagent(category, ticket_id, model, state):
         else _text_of(resp.content)
 
 
-def run_meridian(ticket_id="T-4471", model=None, capture=False):
+def run_meridian(ticket_id="T-4471", model=None, capture=False, trial_num=None):
     """Run the coordinator on a ticket. Returns a result dict the graders score."""
     model = model or MODEL
     system = load_prompt("system-prompt-coordinator.txt")
     tools = load_tools("coordinator-tools.json")
+    label = f"{ticket_id}" + (f" trial {trial_num}" if trial_num else "")
 
     state = {
         "tool_calls": [], "spawned": [], "escalated": [], "response": None,
@@ -533,7 +537,8 @@ def run_meridian(ticket_id="T-4471", model=None, capture=False):
 
     messages = [{"role": "user", "content": f"New ticket: {ticket_id}"}]
 
-    for _ in range(COORDINATOR_MAX_TURNS):
+    for turn in range(COORDINATOR_MAX_TURNS):
+        print(f"  [{label}] coordinator turn {turn + 1}/{COORDINATOR_MAX_TURNS}...", flush=True)
         resp = client.messages.create(
             model=model, system=system, max_tokens=MAX_TOKENS, tools=tools, messages=messages,
         )
@@ -547,7 +552,7 @@ def run_meridian(ticket_id="T-4471", model=None, capture=False):
         results = []
         wrote_response = False
         for tu in tool_uses:
-            out = execute_coordinator_tool(tu.name, dict(tu.input), state, model)
+            out = execute_coordinator_tool(tu.name, dict(tu.input), state, model, trial_num=trial_num)
             state["tool_calls"].append({"agent": "coordinator", "name": tu.name,
                                         "arguments": dict(tu.input)})
             results.append({"type": "tool_result", "tool_use_id": tu.id, "content": out})
@@ -577,12 +582,14 @@ def run_meridian(ticket_id="T-4471", model=None, capture=False):
     return result
 
 
-def execute_coordinator_tool(name, inputs, state, model):
+def execute_coordinator_tool(name, inputs, state, model, trial_num=None):
     if name == "spawn_specialist":
         category = inputs.get("category", "")
         ticket_id = inputs.get("ticket_id", "")
+        label = f"{ticket_id}" + (f" trial {trial_num}" if trial_num else "")
+        print(f"  [{label}] coordinator spawning specialist:{category}...", flush=True)
         state["spawned"].append(category)
-        return run_subagent(category, ticket_id, model, state)
+        return run_subagent(category, ticket_id, model, state, trial_num=trial_num)
     if name == "write_response":
         state["response"] = inputs
         return _j({"status": "sent", "ticket_id": inputs.get("ticket_id")})
@@ -786,8 +793,8 @@ HOLDOUT_TASKS = [
 # coin flip — the agent's routing varies run to run — so one green run proves nothing.
 # (temperature can't be pinned to 0 on these models, so trials are how we get signal.)
 
-def _trial(task, model):
-    result = run_meridian(task["ticket_id"], model=model)
+def _trial(task, model, trial_num=None):
+    result = run_meridian(task["ticket_id"], model=model, trial_num=trial_num)
     grades = [(name, *GRADERS[name](result)) for name in task["graders"]]
     resolved = all(s == 1.0 for n, s, _ in grades if n in task["resolution"])
     return {"result": result, "grades": grades, "resolved": resolved,
@@ -801,8 +808,8 @@ def run_eval(model=None, tasks=TASKS, num_runs=5):
         print(f"\n  Ticket {task['id']} - running {num_runs} trials...", flush=True)
         done = [0]
 
-        def run_one(_):
-            t = _trial(task, model)
+        def run_one(i):
+            t = _trial(task, model, trial_num=i + 1)
             with progress_lock:
                 done[0] += 1
                 verdict = "RESOLVED" if t["resolved"] else "not resolved"
@@ -810,7 +817,10 @@ def run_eval(model=None, tasks=TASKS, num_runs=5):
                       flush=True)
             return t
 
-        with ThreadPoolExecutor(max_workers=min(num_runs, 5)) as ex:
+        # Kept low on purpose: each trial is itself up to ~46 sequential API calls
+        # (coordinator turns + spawned specialists' turns), so a handful of trials
+        # firing at once is already enough to trip a workshop-tier key's rate limit.
+        with ThreadPoolExecutor(max_workers=min(num_runs, 2)) as ex:
             trials = list(ex.map(run_one, range(num_runs)))
         rows.append({"task": task["id"], "trials": trials})
     return {"model": model, "num_runs": num_runs, "rows": rows}
