@@ -1,0 +1,85 @@
+{
+  "tools": [
+    {
+      "name": "get_ticket",
+      "description": "Gets a ticket",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {"type": "string"}
+        },
+        "required": ["ticket_id"]
+      }
+    },
+    {
+      "name": "lookup_customer_by_email",
+      "description": "Customer lookup",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "email": {"type": "string"}
+        },
+        "required": ["email"]
+      }
+    },
+    {
+      "name": "get_billing_history",
+      "description": "Billing history for a customer",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "check_plan_entitlements",
+      "description": "Returns plan entitlements.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "issue_refund",
+      "description": "Issues a refund. Calls Stripe under the hood.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "transaction_id": {"type": "string"},
+          "amount": {"type": "number"},
+          "reason": {"type": "string", "enum": ["duplicate_charge", "billing_error", "service_credit", "goodwill"]}
+        },
+        "required": ["transaction_id", "amount", "reason"]
+      }
+    },
+    {
+      "name": "adjust_invoice",
+      "description": "Invoice adjustment",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "invoice_id": {"type": "string"},
+          "credit_amount": {"type": "number"},
+          "credit_description": {"type": "string"}
+        },
+        "required": ["invoice_id", "credit_amount", "credit_description"]
+      }
+    },
+    {
+      "name": "check_payment_method",
+      "description": "Payment method info",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    }
+  ]
+}

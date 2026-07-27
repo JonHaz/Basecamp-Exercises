@@ -1,0 +1,87 @@
+{
+  "tools": [
+    {
+      "name": "get_ticket",
+      "description": "Gets a ticket",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {"type": "string"}
+        },
+        "required": ["ticket_id"]
+      }
+    },
+    {
+      "name": "lookup_customer_by_email",
+      "description": "Customer lookup",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "email": {"type": "string"}
+        },
+        "required": ["email"]
+      }
+    },
+    {
+      "name": "read_error_logs",
+      "description": "Reads error logs. Note: only last 24h unless you specify since_hours.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "endpoint": {"type": "string"},
+          "status_code": {"type": "integer"},
+          "since_hours": {"type": "integer"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "check_webhook_deliveries",
+      "description": "Webhook delivery log",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "status": {"type": "string", "enum": ["delivered", "retrying", "dropped", "all"]},
+          "since_hours": {"type": "integer"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "test_api_key",
+      "description": "Tests an API key",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "key_prefix": {"type": "string"}
+        },
+        "required": ["key_prefix"]
+      }
+    },
+    {
+      "name": "inspect_integration_config",
+      "description": "Integration config from traffic headers",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "get_rate_limit_status",
+      "description": "Rate limit status",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "endpoint": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,205 @@
+{
+  "tools": [
+    {
+      "name": "get_customer",
+      "description": "Get customer information",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"}
+        },
+        "required": ["id"]
+      }
+    },
+    {
+      "name": "fetch_customer_details",
+      "description": "Fetches customer details",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "fetch_customer_v2_databricks",
+      "description": "Queries the Databricks warehouse. v2 endpoint, use this not the old one.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "lookback_days": {"type": "integer"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "lookup_customer_info",
+      "description": "Look up customer info by ID or email",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "identifier": {"type": "string"}
+        },
+        "required": ["identifier"]
+      }
+    },
+    {
+      "name": "customer_data_retrieval",
+      "description": "Retrieves customer data.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "cust": {"type": "string"}
+        },
+        "required": ["cust"]
+      }
+    },
+    {
+      "name": "get_ticket",
+      "description": "Gets a ticket",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {"type": "string"}
+        },
+        "required": ["ticket_id"]
+      }
+    },
+    {
+      "name": "search_prior_tickets",
+      "description": "Searches tickets",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "query": {"type": "string"},
+          "limit": {"type": "integer"}
+        },
+        "required": ["customer_id", "query"]
+      }
+    },
+    {
+      "name": "helper",
+      "description": "General helper function",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {"type": "string"},
+          "params": {"type": "object"}
+        },
+        "required": ["action"]
+      }
+    },
+    {
+      "name": "process",
+      "description": "Process a request",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "input": {"type": "string"}
+        },
+        "required": ["input"]
+      }
+    },
+    {
+      "name": "check_entitlements",
+      "description": "Takes a customer_id and returns entitlements",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "feature": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "get_data",
+      "description": "Gets data",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string"},
+          "id": {"type": "string"}
+        },
+        "required": ["type", "id"]
+      }
+    },
+    {
+      "name": "tool_3_v2",
+      "description": "Updated version of tool_3. Use this instead of tool_3.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "q": {"type": "string"}
+        },
+        "required": ["q"]
+      }
+    },
+    {
+      "name": "check_system_status",
+      "description": "System status check",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "system": {"type": "string", "enum": ["api", "dashboard", "webhooks", "sso", "all"]}
+        },
+        "required": ["system"]
+      }
+    },
+    {
+      "name": "spawn_specialist",
+      "description": "Spawns a specialist agent for the given category.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["billing", "technical", "account"]
+          },
+          "ticket_id": {"type": "string"}
+        },
+        "required": ["category", "ticket_id"]
+      }
+    },
+    {
+      "name": "write_response",
+      "description": "Writes the response.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {"type": "string"},
+          "response_body": {"type": "string"},
+          "resolution_status": {"type": "string", "enum": ["resolved", "escalated", "needs_info"]}
+        },
+        "required": ["ticket_id", "response_body", "resolution_status"]
+      }
+    },
+    {
+      "name": "escalate_to_human",
+      "description": "Escalates to a human.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {"type": "string"},
+          "reason": {"type": "string", "enum": ["needs_code_change", "security", "customer_escalation", "agent_stuck"]},
+          "summary_for_human": {"type": "string"}
+        },
+        "required": ["ticket_id", "reason", "summary_for_human"]
+      }
+    },
+    {
+      "name": "validate",
+      "description": "Validates",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "string"}
+        },
+        "required": ["data"]
+      }
+    }
+  ]
+}

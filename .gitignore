@@ -1,0 +1,12 @@
+__pycache__/
+day1/04_diagnosing-ai-problems/runs.jsonl
+
+# Secrets — your API key lives in a gitignored .env (never committed).
+# A bare ".env" with no slash ignores it in every folder, root or per-exercise.
+.env
+key.env
+*.local
+
+# Local environments / cruft
+.venv/
+.ipynb_checkpoints/

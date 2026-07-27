@@ -1,0 +1,99 @@
+{
+  "tools": [
+    {
+      "name": "get_ticket",
+      "description": "Gets a ticket",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticket_id": {"type": "string"}
+        },
+        "required": ["ticket_id"]
+      }
+    },
+    {
+      "name": "lookup_customer_by_email",
+      "description": "Customer lookup",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "email": {"type": "string"}
+        },
+        "required": ["email"]
+      }
+    },
+    {
+      "name": "check_sso_config",
+      "description": "SSO config",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "check_audit_log",
+      "description": "Audit log query",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "event_type": {"type": "string"},
+          "after": {"type": "string"},
+          "limit": {"type": "integer"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "get_workspace_account_summary",
+      "description": "Workspace summary. TODO: merge with get_customer_details?",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "list_workspace_users",
+      "description": "Lists users",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "role": {"type": "string", "enum": ["admin", "member", "viewer"]}
+        },
+        "required": ["customer_id"]
+      }
+    },
+    {
+      "name": "modify_permissions",
+      "description": "Changes a user's role.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "user_email": {"type": "string"},
+          "new_role": {"type": "string", "enum": ["admin", "member", "viewer"]}
+        },
+        "required": ["customer_id", "user_email", "new_role"]
+      }
+    },
+    {
+      "name": "reset_2fa",
+      "description": "2FA reset",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string"},
+          "user_email": {"type": "string"}
+        },
+        "required": ["customer_id", "user_email"]
+      }
+    }
+  ]
+}
