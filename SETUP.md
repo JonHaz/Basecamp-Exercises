@@ -26,9 +26,10 @@ followed by `✓ API key verified`.
 
 ## Why the notebook just stopped
 
-Every notebook now checks, in its very first code cell, whether it's running inside
-an isolated environment (a `.venv` or a conda env) before anything below it tries to
-install a package. If it isn't, the notebook stops immediately with:
+Every notebook checks — at the top of the same cell that installs packages, so the
+check can't be skipped by running cells out of order — whether it's running inside an
+isolated environment (a `.venv` or a conda env). If it isn't, the cell stops before
+any install happens, with:
 
 > ⛔ This notebook is running on your SYSTEM Python, not an isolated environment...
 
