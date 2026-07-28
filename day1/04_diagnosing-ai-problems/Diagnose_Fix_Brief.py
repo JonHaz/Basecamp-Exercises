@@ -77,20 +77,51 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(errors="replace")
 
 # Load a .env (next to this script or any parent — e.g. a single repo-root .env) so
-# `python Diagnose_Fix_Brief.py` picks up ANTHROPIC_API_KEY without an explicit export.
+# `python Diagnose_Fix_Brief.py` picks up credentials without an explicit export.
+# Works with either an Anthropic API key or an Amazon Bedrock key — same as the notebook.
 import pathlib as _pl
 for _d in [_pl.Path.cwd().resolve(), *_pl.Path.cwd().resolve().parents]:
     _envf = _d / ".env"
     if _envf.is_file():
         for _line in _envf.read_text().splitlines():
             _line = _line.strip()
-            if _line.startswith("ANTHROPIC_API_KEY=") and not _line.startswith("#"):
-                _v = _line.split("=", 1)[1].strip().strip('"').strip("'")
-                if _v.startswith("sk-ant-"):
-                    os.environ.setdefault("ANTHROPIC_API_KEY", _v)
+            if _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _v = _line.split("=", 1)
+            _k, _v = _k.strip(), _v.strip().strip('"').strip("'")
+            if _k == "ANTHROPIC_API_KEY" and not _v.startswith("sk-ant-"):
+                continue  # skip the placeholder
+            if _k in ("ANTHROPIC_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION"):
+                os.environ.setdefault(_k, _v)
         break
 
-client = Anthropic(timeout=60.0, max_retries=2)
+# ── Provider resolution — Anthropic API or Amazon Bedrock ──
+# Bedrock model IDs carry an `anthropic.` prefix; the Anthropic API uses the bare ID.
+PROVIDER = "anthropic" if os.environ.get("ANTHROPIC_API_KEY", "").startswith("sk-ant-") else (
+    "bedrock" if os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip() else None
+)
+
+
+def _model(name):
+    return f"anthropic.{name}" if PROVIDER == "bedrock" else name
+
+
+def _make_client(timeout=60.0, max_retries=2):
+    if PROVIDER == "bedrock":
+        from anthropic import AnthropicBedrockMantle
+        region = os.environ.get("AWS_REGION", "").strip()
+        if not region:
+            raise SystemExit(
+                "❌ Found AWS_BEARER_TOKEN_BEDROCK but no AWS_REGION.\n"
+                "   Set AWS_REGION to the region your Bedrock models are enabled in "
+                "(e.g. us-east-1) and re-run."
+            )
+        return AnthropicBedrockMantle(aws_region=region, timeout=timeout,
+                                      max_retries=max_retries)
+    return Anthropic(timeout=timeout, max_retries=max_retries)
+
+
+client = _make_client()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -98,7 +129,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # The base model. It is plenty capable — every failure in this system is
 # structural, not a model-capability ceiling. Swapping in a bigger model costs
 # more and does NOT move RESOLVED. That's the whole point of the exercise.
-MODEL = "claude-sonnet-5"
+MODEL = _model("claude-sonnet-5")
 
 # $ per 1M tokens (input, output). Used to price each run so the cost lever is visible.
 # Rates: platform.claude.com/docs/en/about-claude/pricing — add a line for any model not listed.
@@ -605,6 +636,10 @@ def execute_coordinator_tool(name, inputs, state, model, trial_num=None):
 _unpriced_models_warned = set()
 
 def cost_of(usage, model):
+    # Bedrock IDs are the same model with an `anthropic.` prefix — price them the same.
+    # NOTE: these are Anthropic API list rates. Your actual Bedrock bill may differ;
+    # treat COST here as a relative signal for comparing configurations, not an invoice.
+    model = model[len("anthropic."):] if model.startswith("anthropic.") else model
     if model not in PRICING and model not in _unpriced_models_warned:
         _unpriced_models_warned.add(model)
         print(f"\n  [pricing] '{model}' is not in PRICING, so COST is computed at "
@@ -929,15 +964,25 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     # Connection check — fail fast with a clear message instead of a confusing mid-run error.
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit("❌ No ANTHROPIC_API_KEY found. Set it (export ANTHROPIC_API_KEY=...) and re-run.")
+    if PROVIDER is None:
+        raise SystemExit(
+            "❌ No credentials found. Set one of:\n"
+            "     export ANTHROPIC_API_KEY=sk-ant-...                 # Anthropic API\n"
+            "     export AWS_BEARER_TOKEN_BEDROCK=...  AWS_REGION=... # Amazon Bedrock\n"
+            "   (or put either in a .env file at the repo root), then re-run."
+        )
+    _probe_model = _model("claude-haiku-4-5")
     try:
-        client.messages.create(model="claude-haiku-4-5", max_tokens=5,
+        client.messages.create(model=_probe_model, max_tokens=5,
                                messages=[{"role": "user", "content": "Reply with: ready"}])
     except Exception as e:
-        raise SystemExit(f"❌ API key check failed — {type(e).__name__}: {e}\n"
-                         "   Fix the key (missing, invalid, or rate-limited) and re-run.")
-    print("✅ API key connected — any error after this is not the API key.\n")
+        _hint = ("   Fix the key (missing, invalid, or rate-limited) and re-run."
+                 if PROVIDER == "anthropic" else
+                 f"   Check AWS_BEARER_TOKEN_BEDROCK, and that '{_probe_model}' is enabled for\n"
+                 f"   your account in {os.environ.get('AWS_REGION', '?')}, then re-run.")
+        raise SystemExit(f"❌ Credential check failed — {type(e).__name__}: {e}\n{_hint}")
+    _via = "Anthropic API" if PROVIDER == "anthropic" else f"Bedrock ({os.environ.get('AWS_REGION')})"
+    print(f"✅ Connected via {_via} as {MODEL} — any error after this is not the credential.\n")
 
     if args.capture:
         out = run_meridian(args.capture, model=args.model, capture=True)

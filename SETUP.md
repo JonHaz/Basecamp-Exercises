@@ -14,6 +14,14 @@ pip install -r requirements.txt       # install everything the exercises need
 export ANTHROPIC_API_KEY=sk-ant-...   # your key (Windows PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-...")
 ```
 
+**On Amazon Bedrock instead of the Anthropic API?** Same four commands, but set these
+two in place of `ANTHROPIC_API_KEY` — see "Using an Amazon Bedrock key" below:
+
+```bash
+export AWS_BEARER_TOKEN_BEDROCK=...   # your Bedrock API key
+export AWS_REGION=us-east-1           # the region your models are enabled in
+```
+
 Then open any `.ipynb` in VS Code and **select the `.venv` interpreter as the kernel**
 (see "Wrong kernel" below). Run the first cell — you should see `✓ Dependencies ready`
 followed by `✓ API key verified`.
@@ -49,6 +57,49 @@ self-managed system Python)?** Set `BASECAMP_ALLOW_SYSTEM_PYTHON=1` in your shel
 before launching VS Code/Jupyter to bypass the check for that session. This is an
 intentional escape hatch for people who know what they're doing — don't hand this
 out as a default fix to a participant who's actually hit the corporate-IT case above.
+
+---
+
+## Using an Amazon Bedrock key
+
+The exercises run on either an Anthropic API key or an Amazon Bedrock key — the setup
+cell detects which one you have and connects accordingly. You don't change any exercise
+code; only the credentials differ.
+
+Put **both** of these in your `.env` (or export them in your shell), and comment out or
+delete the `ANTHROPIC_API_KEY` line:
+
+```
+# ANTHROPIC_API_KEY=paste-your-key-here
+AWS_BEARER_TOKEN_BEDROCK=<your Bedrock API key>
+AWS_REGION=us-east-1
+```
+
+`AWS_REGION` is required — Bedrock has no default. Use the region your Claude models are
+enabled in. When it connects you'll see a green banner naming the provider and region:
+**"✓ Bedrock key verified (us-east-1) — you're connected to Claude as
+anthropic.claude-sonnet-5."**
+
+Two things to know:
+
+- **Model access is per account *and* per region.** A valid key can still fail with
+  "model isn't available to you in `<region>`" — that means the model isn't enabled for
+  your account there. Enable it in the Bedrock console under **Model access**, or switch
+  `AWS_REGION` to a region where it is. The setup cell checks this up front so you find
+  out at setup rather than four cells later.
+- **Model IDs differ.** Bedrock prefixes them (`anthropic.claude-sonnet-5`); the
+  Anthropic API uses the bare ID (`claude-sonnet-5`). The notebooks handle this for you
+  via the `MODEL` / `FAST_MODEL` / `BIG_MODEL` variables the setup cell defines — use
+  those rather than hardcoding an ID, and your code runs on both.
+
+**If both credentials are set, the Anthropic API key wins.** To force the Bedrock path,
+unset or comment out `ANTHROPIC_API_KEY`.
+
+**One exercise differs on Bedrock:** Day 2's Inference Optimization demonstrates the
+Batch API, which is an Anthropic API endpoint that Bedrock doesn't expose. The notebook
+detects this, builds and shows the batch requests, and skips only the live submission —
+the cost model that follows is the actual teaching point and is unaffected. (Bedrock has
+its own batch-inference product with a different API.)
 
 ---
 
