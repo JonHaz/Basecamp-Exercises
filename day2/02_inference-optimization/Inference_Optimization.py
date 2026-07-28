@@ -124,18 +124,27 @@ def _status(ok, msg):
     except Exception:
         print(("[OK] " if ok else "[!!] ") + msg)
 
-import os, pathlib
+import os
+import pathlib
 
-# ── API key via .env (gitignored — never committed) ──
-# Your key lives in a .env file. We look for one next to this notebook or in any parent
-# folder, so a single .env at the repo root can serve every exercise (paste once). If none
-# exists yet, we create one from this template — fill it in, save, and re-run the cell.
+import anthropic
+
+# ── Connect to Claude — Anthropic API or Amazon Bedrock ──
+# Works with either credential type; the cell figures out which you have.
+#   Anthropic API : ANTHROPIC_API_KEY=sk-ant-...
+#   Amazon Bedrock: AWS_BEARER_TOKEN_BEDROCK=...  plus  AWS_REGION=us-east-1
+# Put whichever you use in the .env file this cell creates (gitignored — never committed),
+# or export it in your shell. A value in the shell wins over the .env file.
 _ENV_TEMPLATE = (
-    "# Paste your Anthropic API key after the = (no quotes, no spaces), then save\n"
-    "# and re-run the setup cell. Get a key at https://console.anthropic.com/\n"
-    "# This file is gitignored — your key is never committed.\n"
+    "# Anthropic API key — paste after the = (no quotes, no spaces), then save and\n"
+    "# re-run the setup cell. Get one at https://console.anthropic.com/\n"
     "ANTHROPIC_API_KEY=paste-your-key-here\n"
+    "\n"
+    "# --- Using Amazon Bedrock instead? Comment out the line above and fill these in:\n"
+    "# AWS_BEARER_TOKEN_BEDROCK=paste-your-bedrock-api-key-here\n"
+    "# AWS_REGION=us-east-1\n"
 )
+
 
 def _resolve_env_file():
     """Nearest existing .env walking up from the working dir (so one root .env serves every
@@ -149,14 +158,15 @@ def _resolve_env_file():
                  if (d / "SETUP.md").exists() or (d / ".git").exists()), here)
     return root / ".env"
 
+
 _env_file = _resolve_env_file()
 if not _env_file.exists():
     _env_file.write_text(_ENV_TEMPLATE)
-    print(f"Created {_env_file.name} in {_env_file.parent} — open it, paste your key after "
-          "ANTHROPIC_API_KEY=, save, then re-run this cell.")
+    print(f"Created {_env_file.name} in {_env_file.parent} — open it, add your key, "
+          "save, then re-run this cell.")
 
 # Tiny .env parser (no python-dotenv dependency). Re-read on every run, so pasting your
-# key and re-running picks it up. A real key in the environment (shell / Claude Code / CI)
+# key and re-running picks it up. A real value in the environment (shell / Claude Code / CI)
 # wins; the placeholder never sticks.
 _file = {}
 for _line in (_env_file.read_text().splitlines() if _env_file.exists() else []):
@@ -167,42 +177,140 @@ for _line in (_env_file.read_text().splitlines() if _env_file.exists() else []):
 for _k, _v in _file.items():
     if _k != "ANTHROPIC_API_KEY":
         os.environ.setdefault(_k, _v)
-_shell = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-api_key = _shell if _shell.startswith("sk-ant-") else _file.get("ANTHROPIC_API_KEY", "").strip()
-if not api_key.startswith("sk-ant-"):
-    print(
-        "\n📋 Add your key to continue:\n"
-        f"   1. Open this file:  {_env_file}\n"
-        "   2. Replace  paste-your-key-here  with your key (it starts with sk-ant-)\n"
-        "   3. Save the file, then click ▶ on this cell again.\n"
-    )
+
+_shell_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+_anthropic_key = _shell_key if _shell_key.startswith("sk-ant-") else _file.get("ANTHROPIC_API_KEY", "").strip()
+_bedrock_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+_bedrock_region = os.environ.get("AWS_REGION", "").strip()
+
+if _anthropic_key.startswith("sk-ant-"):
+    PROVIDER = "anthropic"
+elif _bedrock_token:
+    PROVIDER = "bedrock"
 else:
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key, timeout=30.0, max_retries=1)
+    PROVIDER = None
+
+
+def _needs_credentials(head, body):
+    """Warning-yellow banner + stop, so setup fails here rather than several cells later."""
+    _shown = False
     try:
-        client.messages.create(model="claude-haiku-4-5", max_tokens=1,
-                               messages=[{"role": "user", "content": "ping"}])
-    except anthropic.AuthenticationError:
-        _status(False, "That key was rejected. Run this cell again and paste the whole key (it starts with sk-ant-).")
-        raise SystemExit("API key not accepted - re-run this cell and try again.")
-    except Exception as exc:
-        _status(False, "Could not reach the Claude API (" + type(exc).__name__ + "). Check your connection, then run this cell again.")
-        raise
+        from IPython import get_ipython
+        if get_ipython().__class__.__name__ == "ZMQInteractiveShell":
+            import html as _html
+            from IPython.display import HTML, display
+            display(HTML(
+                '<div style="padding:12px 16px;border-radius:8px;background:#fff8c5;'
+                'border:1.5px solid #9a6700;font-size:15px;font-family:sans-serif;">'
+                '<div style="color:#9a6700;font-weight:600;">' + _html.escape(head) + '</div>'
+                '<pre style="margin:10px 0 0;font-family:inherit;font-size:14px;font-weight:400;'
+                'color:#141413;white-space:pre-wrap;">' + _html.escape(body) + '</pre></div>'
+            ))
+            _shown = True
+    except Exception:
+        pass
+    if not _shown:
+        print("\n" + head + ":\n   " + body.replace("\n", "\n   ") + "\n")
+    raise SystemExit("Credentials missing — see the message above.")
+
+
+if PROVIDER is None:
+    _needs_credentials(
+        "📋 Add your credentials to continue",
+        f"Open this file:  {_env_file}\n"
+        "\n"
+        "Using the Anthropic API? Set:\n"
+        "    ANTHROPIC_API_KEY=sk-ant-...\n"
+        "\n"
+        "Using Amazon Bedrock? Set both:\n"
+        "    AWS_BEARER_TOKEN_BEDROCK=<your Bedrock API key>\n"
+        "    AWS_REGION=us-east-1          # the region your models are enabled in\n"
+        "\n"
+        "Save the file, then click ▶ on this cell again."
+    )
+
+if PROVIDER == "bedrock" and not _bedrock_region:
+    _needs_credentials(
+        "📋 Bedrock needs a region",
+        f"Found AWS_BEARER_TOKEN_BEDROCK but no AWS_REGION.\n"
+        f"\n"
+        f"Open this file:  {_env_file}\n"
+        "and add the region your Bedrock models are enabled in, e.g.:\n"
+        "    AWS_REGION=us-east-1\n"
+        "\n"
+        "Save the file, then click ▶ on this cell again."
+    )
+
+
+def _model(name):
+    """Bedrock model IDs carry an `anthropic.` prefix; the Anthropic API uses the bare ID."""
+    return f"anthropic.{name}" if PROVIDER == "bedrock" else name
+
+
+# Named models the exercise uses — resolved for whichever provider you're on.
+MODEL = _model("claude-sonnet-5")        # the workhorse for this exercise
+FAST_MODEL = _model("claude-haiku-4-5")  # cheap + quick (connection check, judges)
+BIG_MODEL = _model("claude-opus-4-8")    # when you want to try a larger model
+
+
+def _make_client(timeout, max_retries=2):
+    if PROVIDER == "bedrock":
+        from anthropic import AnthropicBedrockMantle
+        return AnthropicBedrockMantle(aws_region=_bedrock_region,
+                                      timeout=timeout, max_retries=max_retries)
+    return anthropic.Anthropic(api_key=_anthropic_key,
+                               timeout=timeout, max_retries=max_retries)
+
+
+# Connection check — verifies the credential AND that this model is reachable for you.
+# On Bedrock a valid key can still 404 if the model isn't enabled in your account/region,
+# so we ping the real model ID rather than just checking the credential's shape.
+_probe = _make_client(timeout=30.0, max_retries=1)
+try:
+    _probe.messages.create(model=FAST_MODEL, max_tokens=1,
+                           messages=[{"role": "user", "content": "ping"}])
+except anthropic.NotFoundError:
+    if PROVIDER == "bedrock":
+        _status(False, f"Bedrock reached, but model '{FAST_MODEL}' isn't available to you in "
+                       f"{_bedrock_region}. Enable model access for it in the Bedrock console "
+                       f"(or switch AWS_REGION to a region where it is enabled), then re-run.")
     else:
-        os.environ["ANTHROPIC_API_KEY"] = api_key  # later cells (and any !python commands) pick it up from here
+        _status(False, f"Model '{FAST_MODEL}' not found for this key.")
+    raise SystemExit("Model not available — see the message above.")
+except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
+    if PROVIDER == "bedrock":
+        _status(False, "That Bedrock key was rejected. Check AWS_BEARER_TOKEN_BEDROCK and that "
+                       "it has Bedrock invoke permissions, then run this cell again.")
+    else:
+        _status(False, "That key was rejected. Run this cell again and paste the whole key "
+                       "(it starts with sk-ant-).")
+    raise SystemExit("Credentials not accepted - re-run this cell and try again.")
+except Exception as exc:
+    _status(False, "Could not reach the API (" + type(exc).__name__ + "). Check your "
+                   "connection, then run this cell again.")
+    raise
+else:
+    if PROVIDER == "anthropic":
+        os.environ["ANTHROPIC_API_KEY"] = _anthropic_key  # later cells / !python pick it up
         _status(True, "API key verified - you're connected to Claude.")
+    else:
+        _status(True, f"Bedrock key verified ({_bedrock_region}) - you're connected to Claude "
+                      f"as {MODEL}.")
+
+# The working client. Longer timeout: needed for max_tokens>21333 with non-streaming calls.
+client = _make_client(timeout=900.0)
 
 # %%
-# The lab client: SDK defaults (long timeout, standard retries). The verification client
-# above uses a short 30s timeout — fine for a 1-token ping, fatal for v0's deliberately
-# slow, non-streamed essay calls. Re-create it; the key is in the environment now.
-client = anthropic.Anthropic()
+# The lab client was created by the setup block above with a long timeout — the short
+# 30s probe client is fine for a 1-token ping but fatal for v0's deliberately slow,
+# non-streamed essay calls. It's already the right one; nothing to re-create here.
 
 # The model portfolio. Aliases, not date-pinned IDs — aliases track the current snapshot
-# and don't 404 when a snapshot is retired.
-MODEL_HAIKU = "claude-haiku-4-5"
-MODEL_SONNET = "claude-sonnet-5"
-MODEL_OPUS = "claude-opus-4-8"
+# and don't 404 when a snapshot is retired. Resolved for your provider (Anthropic API or
+# Amazon Bedrock) in the setup block above.
+MODEL_HAIKU = FAST_MODEL
+MODEL_SONNET = MODEL
+MODEL_OPUS = BIG_MODEL
 
 print(f"SDK {anthropic.__version__} · portfolio: {MODEL_HAIKU}, {MODEL_SONNET}, {MODEL_OPUS}")
 
@@ -1046,7 +1154,15 @@ print(f"\nInteractive lane:  ${interactive_cpc:.4f}/contract")
 print(f"Batch lane (50%):  ${interactive_cpc * BATCH_DISCOUNT:.4f}/contract")
 
 RUN_BATCH = False  # flip to True to actually submit; poll with client.messages.batches.retrieve()
-if RUN_BATCH:
+if RUN_BATCH and PROVIDER == "bedrock":
+    # The Batch API is an Anthropic API endpoint — Amazon Bedrock doesn't expose it.
+    # Everything above still stands: the requests are built, and the 50%-off economics
+    # below are the actual teaching point. Bedrock has its own batch-inference product
+    # with a different API; the lever (defer non-urgent work, pay less) is the same.
+    print("⚠️  Skipping live submission: the Batch API isn't available on Amazon Bedrock.")
+    print("    The batch requests above are built and valid — inspect them, and read the")
+    print("    cost model below. On Bedrock you'd use its own batch-inference offering.")
+elif RUN_BATCH:
     batch = client.messages.batches.create(requests=batch_requests)
     print(f"Submitted batch {batch.id} — status: {batch.processing_status}")
     print("Poll: client.messages.batches.retrieve(batch.id); "

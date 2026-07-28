@@ -18,6 +18,30 @@ git clone https://github.com/victorsteeb/Basecamp-Exercises.git
 
 ---
 
+---
+
+> ### ⚠️ Run these locally — not in OneDrive, Dropbox, or iCloud Drive
+>
+> These exercises run **on your machine**: a local Python environment, local files, a local
+> Git repo. Cloud-sync folders aren't a normal local folder, and putting the exercises in
+> one will break them. Unzip or clone somewhere plain instead — `C:\dev\`, `~/projects/`,
+> your Desktop.
+>
+> The reason is literal, not just cautionary. With OneDrive's **Files On-Demand**, your
+> files may not actually be on the disk — they're placeholders that download when opened.
+> A notebook that looks fine in Explorer can be read as truncated, and saving over it
+> destroys the real content, silently. On top of that, sync fights the things setup
+> creates: it locks the thousands of small files in `.venv` mid-install, and it can corrupt
+> a `.git` folder outright — Microsoft's own tooling warns about exactly this.
+>
+> One more, worth knowing: your API key lives in a gitignored `.env`. `.gitignore` keeps it
+> out of Git. It does **nothing** to stop OneDrive uploading it to corporate cloud storage.
+>
+> **Already unzipped into OneDrive?** Move the folder somewhere local, delete `.venv`, and
+> redo setup. Don't try to repair it in place.
+
+---
+
 ## What's inside
 
 ### Day 1
