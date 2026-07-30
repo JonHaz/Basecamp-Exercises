@@ -103,7 +103,11 @@ PROVIDER = "anthropic" if os.environ.get("ANTHROPIC_API_KEY", "").startswith("sk
 
 
 def _model(name):
-    return f"anthropic.{name}" if PROVIDER == "bedrock" else name
+    # Idempotent, so a value that arrived from --model can be resolved without
+    # risking a doubled `anthropic.anthropic.` prefix.
+    if PROVIDER != "bedrock":
+        return name
+    return name if name.startswith("anthropic.") else f"anthropic.{name}"
 
 
 def _make_client(timeout=60.0, max_retries=2):
@@ -963,6 +967,11 @@ if __name__ == "__main__":
                     help="run one ticket once and write reference trace files (coordinator + specialists)")
     args = ap.parse_args()
 
+    # --model arrives as a bare id (e.g. claude-opus-4-8). Resolve it for the active
+    # provider so Bedrock gets the prefix it requires. The argparse default is already
+    # resolved and _model() is idempotent, so this is safe either way.
+    args.model = _model(args.model)
+
     # Connection check — fail fast with a clear message instead of a confusing mid-run error.
     if PROVIDER is None:
         raise SystemExit(
@@ -982,7 +991,8 @@ if __name__ == "__main__":
                  f"   your account in {os.environ.get('AWS_REGION', '?')}, then re-run.")
         raise SystemExit(f"❌ Credential check failed — {type(e).__name__}: {e}\n{_hint}")
     _via = "Anthropic API" if PROVIDER == "anthropic" else f"Bedrock ({os.environ.get('AWS_REGION')})"
-    print(f"✅ Connected via {_via} as {MODEL} — any error after this is not the credential.\n")
+    print(f"✅ Connected via {_via} — credential verified with {_probe_model}. "
+          f"This run uses {args.model}. Any error after this is not the credential.\n")
 
     if args.capture:
         out = run_meridian(args.capture, model=args.model, capture=True)
