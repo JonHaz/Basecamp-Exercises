@@ -36,6 +36,10 @@
 #
 # > 💸 Running every cell in this notebook costs roughly **$2–4** of API usage, most of it in the
 # > deliberately wasteful v0 baseline. That's part of the lesson.
+#
+# ---
+#
+# **Prepared for Partner Basecamp participants.** Not for reproduction or redistribution as training material — you're free to apply these patterns in your own client work.
 
 # %% [markdown]
 # # Part 0 · Setup

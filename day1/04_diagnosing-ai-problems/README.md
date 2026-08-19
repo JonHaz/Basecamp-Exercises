@@ -1,5 +1,7 @@
 # Diagnose, Fix, Brief · The Meridian Pilot
 
+**Prepared for Partner Basecamp participants.** Not for reproduction or redistribution as training material — you're free to apply these patterns in your own client work.
+
 A client's AI support agent is failing and they think it's the model. Your job is to find what's actually wrong, fix it, and prove the fix with numbers the client can take to their leadership.
 
 **Read the email first: [`Priya_Email.md`](Priya_Email.md).** Then work the system.

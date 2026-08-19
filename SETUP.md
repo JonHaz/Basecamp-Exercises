@@ -1,5 +1,7 @@
 # Setup & Troubleshooting
 
+**Prepared for Partner Basecamp participants.** Not for reproduction or redistribution as training material — you're free to apply these patterns in your own client work.
+
 One page to get any laptop — including a locked-down corporate one — running the
 Basecamp notebooks. **The fastest reliable path is a virtual environment in VS Code.**
 

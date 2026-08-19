@@ -1,5 +1,7 @@
 # Partner Basecamp · Session Materials
 
+**Prepared for Partner Basecamp participants.** Not for reproduction or redistribution as training material — you're free to apply these patterns in your own client work.
+
 This repository contains all notebooks and supporting files for Partner Basecamp sessions. Materials are organized by day and session in the order they run.
 
 ---

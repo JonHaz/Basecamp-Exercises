@@ -1,5 +1,7 @@
 # Inference Optimization · **The Margin Call** · Build-Along
 
+**Prepared for Partner Basecamp participants.** Not for reproduction or redistribution as training material — you're free to apply these patterns in your own client work.
+
 ## What you're doing
 You inherit **ClauseScan v0** — a contract-diligence agent your firm's demo team built the
 night before a winning pitch. It reviews supplier contracts for a private-equity client's

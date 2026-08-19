@@ -1,5 +1,7 @@
 # Claude Code Workshop
 
+**Prepared for Partner Basecamp participants.** Not for reproduction or redistribution as training material — you're free to apply these patterns in your own client work.
+
 Use Claude Code to explore, modify, and extend a live factory inventory management system — a real Vue 3 frontend and FastAPI backend. The exercise is open-ended: there's no single right output. The point is to experience Claude Code as a development partner on a codebase you didn't write.
 
 ## Step-by-step guide

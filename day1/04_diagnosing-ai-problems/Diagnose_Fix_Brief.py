@@ -21,6 +21,10 @@
 #                                                          # ...watch cost rise, RESOLVED stay NO
 # =============================================================================
 
+# Prepared for Partner Basecamp participants. Not for reproduction or
+# redistribution as training material — you're free to apply these
+# patterns in your own client work.
+
 import os
 import re
 import sys
