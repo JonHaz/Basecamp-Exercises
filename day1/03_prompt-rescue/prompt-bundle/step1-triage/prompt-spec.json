@@ -1,0 +1,30 @@
+{
+  "spec_version": 1,
+  "kind": "system",
+  "task": "Triage an inbound support ticket: assign a P1-P4 priority from business impact alone, and extract only the entities the ticket literally states",
+  "artifact": "a single JSON object carrying priority, entities and confidence",
+  "audience": "the triage stage of an automated support-ticket pipeline",
+  "inputs": [
+    {
+      "name": "ticket",
+      "description": "the raw inbound support ticket text",
+      "trust": "untrusted",
+      "tag": "ticket"
+    }
+  ],
+  "success_criteria": [
+    "priority follows the P1-P4 impact rubric and ignores tone, capitalisation and urgency words",
+    "every entity value appears verbatim in the ticket, and anything the ticket does not state is null",
+    "a feature request is P4 however urgently it is phrased",
+    "confidence is low when the ticket names no product, version or error code"
+  ],
+  "failure_modes": [
+    "invents a product name such as CRM Platform when the ticket only describes a system",
+    "writes a hedge string such as Unknown - not specified into a field instead of null",
+    "raises the priority because the ticket is angry, all-caps or says immediately",
+    "reports an approximate affected-user count the ticket never gives"
+  ],
+  "constraints": {
+    "format": "json"
+  }
+}

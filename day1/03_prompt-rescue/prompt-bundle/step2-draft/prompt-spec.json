@@ -1,0 +1,37 @@
+{
+  "spec_version": 1,
+  "kind": "system",
+  "task": "Write the customer response for an already-triaged support ticket and assemble the final triage record",
+  "artifact": "a single JSON object carrying priority, entities, response and confidence",
+  "audience": "the response-drafting stage of an automated support-ticket pipeline",
+  "inputs": [
+    {
+      "name": "ticket",
+      "description": "the raw inbound support ticket text",
+      "trust": "untrusted",
+      "tag": "ticket"
+    },
+    {
+      "name": "triage",
+      "description": "the triage record produced by the previous step",
+      "trust": "trusted",
+      "tag": "triage"
+    }
+  ],
+  "success_criteria": [
+    "the response is consistent with the priority it is handed and never re-triages it",
+    "a P4 feature request is acknowledged as a request, never promised as a fix",
+    "a vague ticket's response asks for the specific detail that is missing",
+    "every distinct issue raised in a multi-issue ticket is acknowledged",
+    "priority, entities and confidence are copied through from the triage record unchanged"
+  ],
+  "failure_modes": [
+    "promises to fix a feature request that was classified P4",
+    "changes the priority it was handed",
+    "answers only the last issue in a multi-issue ticket",
+    "wraps the JSON object in prose or markdown fences"
+  ],
+  "constraints": {
+    "format": "json"
+  }
+}

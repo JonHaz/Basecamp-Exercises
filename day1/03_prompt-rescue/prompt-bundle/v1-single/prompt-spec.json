@@ -1,0 +1,31 @@
+{
+  "spec_version": 1,
+  "kind": "system",
+  "task": "Process an inbound support ticket end to end: assign a P1-P4 priority, extract only the entities the ticket states, and draft the customer response",
+  "artifact": "a single JSON object carrying priority, entities, response and confidence",
+  "audience": "an automated support-ticket processor",
+  "inputs": [
+    {
+      "name": "ticket",
+      "description": "the raw inbound support ticket text",
+      "trust": "untrusted",
+      "tag": "ticket"
+    }
+  ],
+  "success_criteria": [
+    "priority follows the P1-P4 impact rubric and ignores tone, capitalisation and urgency words",
+    "every entity value appears verbatim in the ticket, and anything the ticket does not state is null",
+    "a feature request is P4 however urgently it is phrased",
+    "the response is consistent with the priority and never promises to fix a feature request",
+    "a vague ticket's response asks for the specific detail that is missing"
+  ],
+  "failure_modes": [
+    "invents a product name or error code the ticket never states",
+    "writes a hedge string such as Unknown - not specified into a field instead of null",
+    "raises the priority because the ticket is angry, all-caps or says immediately",
+    "drafts an empathetic response that contradicts the priority it assigned"
+  ],
+  "constraints": {
+    "format": "json"
+  }
+}
