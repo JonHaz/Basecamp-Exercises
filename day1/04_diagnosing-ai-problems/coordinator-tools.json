@@ -1,146 +1,44 @@
 {
   "tools": [
     {
-      "name": "get_customer",
-      "description": "Get customer information",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "string"}
-        },
-        "required": ["id"]
-      }
-    },
-    {
-      "name": "fetch_customer_details",
-      "description": "Fetches customer details",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "customer_id": {"type": "string"}
-        },
-        "required": ["customer_id"]
-      }
-    },
-    {
-      "name": "fetch_customer_v2_databricks",
-      "description": "Queries the Databricks warehouse. v2 endpoint, use this not the old one.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "customer_id": {"type": "string"},
-          "lookback_days": {"type": "integer"}
-        },
-        "required": ["customer_id"]
-      }
-    },
-    {
-      "name": "lookup_customer_info",
-      "description": "Look up customer info by ID or email",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "identifier": {"type": "string"}
-        },
-        "required": ["identifier"]
-      }
-    },
-    {
-      "name": "customer_data_retrieval",
-      "description": "Retrieves customer data.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "cust": {"type": "string"}
-        },
-        "required": ["cust"]
-      }
-    },
-    {
       "name": "get_ticket",
-      "description": "Gets a ticket",
+      "description": "Retrieve the full ticket record: subject, body, submitter email, priority, created_at. Call this first on every ticket.",
       "input_schema": {
         "type": "object",
         "properties": {
-          "ticket_id": {"type": "string"}
+          "ticket_id": {"type": "string", "pattern": "^T-[0-9]{4}$"}
         },
         "required": ["ticket_id"]
       }
     },
     {
-      "name": "search_prior_tickets",
-      "description": "Searches tickets",
+      "name": "lookup_customer_info",
+      "description": "Resolve a customer from either an email address or a customer_id. Returns customer_id, name, plan tier, tier_since, seat count, and SSO status. This is the only customer lookup you need.",
       "input_schema": {
         "type": "object",
         "properties": {
-          "customer_id": {"type": "string"},
-          "query": {"type": "string"},
-          "limit": {"type": "integer"}
+          "identifier": {"type": "string", "maxLength": 200,
+                         "description": "Submitter email address or customer_id."}
+        },
+        "required": ["identifier"]
+      }
+    },
+    {
+      "name": "search_prior_tickets",
+      "description": "Search this customer's earlier tickets for related history. Returns an empty list when there is none — that is a valid answer, not an error.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "customer_id": {"type": "string", "maxLength": 64},
+          "query": {"type": "string", "maxLength": 200},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 20}
         },
         "required": ["customer_id", "query"]
       }
     },
     {
-      "name": "helper",
-      "description": "General helper function",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "action": {"type": "string"},
-          "params": {"type": "object"}
-        },
-        "required": ["action"]
-      }
-    },
-    {
-      "name": "process",
-      "description": "Process a request",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "input": {"type": "string"}
-        },
-        "required": ["input"]
-      }
-    },
-    {
-      "name": "check_entitlements",
-      "description": "Takes a customer_id and returns entitlements",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "customer_id": {"type": "string"},
-          "feature": {"type": "string"}
-        },
-        "required": ["customer_id"]
-      }
-    },
-    {
-      "name": "get_data",
-      "description": "Gets data",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "type": {"type": "string"},
-          "id": {"type": "string"}
-        },
-        "required": ["type", "id"]
-      }
-    },
-    {
-      "name": "tool_3_v2",
-      "description": "Updated version of tool_3. Use this instead of tool_3.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "q": {"type": "string"}
-        },
-        "required": ["q"]
-      }
-    },
-    {
       "name": "check_system_status",
-      "description": "System status check",
+      "description": "Check whether a Meridian subsystem is currently degraded. Use it to rule out a platform-wide outage before treating a fault as customer-specific.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -151,54 +49,49 @@
     },
     {
       "name": "spawn_specialist",
-      "description": "Spawns a specialist agent for the given category.",
+      "description": "Hand one issue to the specialist who owns it. The specialist has the deep tools and does the actual resolution work. Call this once for EACH category the ticket raises — a ticket with an account problem and a billing problem needs two calls. Never call it twice for the same category.",
       "input_schema": {
         "type": "object",
         "properties": {
           "category": {
             "type": "string",
-            "enum": ["billing", "technical", "account"]
+            "enum": ["billing", "technical", "account"],
+            "description": "billing = money; technical = integration/API; account = SSO, seats, permissions, 2FA."
           },
-          "ticket_id": {"type": "string"}
+          "ticket_id": {"type": "string", "pattern": "^T-[0-9]{4}$"}
         },
         "required": ["category", "ticket_id"]
       }
     },
     {
-      "name": "write_response",
-      "description": "Writes the response.",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "ticket_id": {"type": "string"},
-          "response_body": {"type": "string"},
-          "resolution_status": {"type": "string", "enum": ["resolved", "escalated", "needs_info"]}
-        },
-        "required": ["ticket_id", "response_body", "resolution_status"]
-      }
-    },
-    {
       "name": "escalate_to_human",
-      "description": "Escalates to a human.",
+      "description": "Route an issue to a human when it needs authority, approval, or a judgement no specialist tool can provide — for example authorizing a penetration test, granting a contractual exception, or any request where no tool in the system can perform the action. Escalating is a correct outcome, not a failure.",
       "input_schema": {
         "type": "object",
         "properties": {
-          "ticket_id": {"type": "string"},
+          "ticket_id": {"type": "string", "pattern": "^T-[0-9]{4}$"},
           "reason": {"type": "string", "enum": ["needs_code_change", "security", "customer_escalation", "agent_stuck"]},
-          "summary_for_human": {"type": "string"}
+          "summary_for_human": {"type": "string", "maxLength": 2000,
+                                "description": "What the human needs to decide, and what has already been done."}
         },
         "required": ["ticket_id", "reason", "summary_for_human"]
       }
     },
     {
-      "name": "validate",
-      "description": "Validates",
+      "name": "write_response",
+      "description": "Send the final customer-facing reply and close out the ticket. Call this once, last.",
       "input_schema": {
         "type": "object",
         "properties": {
-          "data": {"type": "string"}
+          "ticket_id": {"type": "string", "pattern": "^T-[0-9]{4}$"},
+          "response_body": {"type": "string", "maxLength": 8000},
+          "resolution_status": {
+            "type": "string",
+            "enum": ["resolved", "escalated", "needs_info"],
+            "description": "resolved = every issue the customer raised has an actioning tool call behind it; escalated = some issue went to a human; needs_info = blocked waiting on the customer."
+          }
         },
-        "required": ["data"]
+        "required": ["ticket_id", "response_body", "resolution_status"]
       }
     }
   ]
