@@ -10,3 +10,6 @@ key.env
 # Local environments / cruft
 .venv/
 .ipynb_checkpoints/
+
+# Eval harness output — the executed notebook cells are the evidence, not these blobs
+day2/01_evals/eval_results/
