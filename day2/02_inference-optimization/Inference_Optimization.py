@@ -89,7 +89,10 @@ print("✓ Dependencies ready")
 import os
 import json
 import time
+import hashlib
+import pathlib
 import statistics
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -424,34 +427,81 @@ print(f"TTFT {ttft*1000:.0f}ms · TTC {total*1000:.0f}ms · OTPS {otps:.1f} tok/
 # | Model | Input $/MTok | Output $/MTok |
 # |---|---|---|
 # | Haiku 4.5 | $1.00 | $5.00 |
-# | Sonnet 5 | $3.00 | $15.00 |
+# | Sonnet 5 | $2.00 | $10.00 |
 # | Opus 4.8 | $5.00 | $25.00 |
 #
-# *(Verify against the pricing page before quoting in a deliverable — table cached June 2026.
-# Batch API runs at 50% of everything; that lever arrives in Part 4.)*
+# *(Re-verified 2026-08-28 against the live pricing page — the shipped table had Sonnet at
+# $3.00/$15.00, which is the **Sonnet 4.6** rate. See the decision log below. Batch API runs at
+# 50% of everything; that lever arrives in Part 4.)*
+
+# %% [markdown]
+# ### 🧭 Decision log — the cost model is a claim, and claims get verified
+#
+# Before optimizing anything, audit the instrument. The shipped `PRICING` table is hardcoded and
+# self-dated "June 2026", and one row is wrong.
+#
+# | Model | Notebook shipped | Verified 2026-08-28 | |
+# |---|---|---|---|
+# | Haiku 4.5 | $1.00 / $5.00 | $1.00 / $5.00 | ✅ |
+# | Sonnet 5 | **$3.00 / $15.00** | **$2.00 / $10.00** | ⚠️ corrected |
+# | Opus 4.8 | $5.00 / $25.00 | $5.00 / $25.00 | ✅ |
+#
+# **Source:** `platform.claude.com/docs/en/about-claude/pricing`, fetched 2026-08-28. $3/$15 is the
+# **Sonnet 4.6** rate — a stale row carried forward onto a Sonnet 5 constant. The page also notes
+# that Sonnet 5's $2/$10 launch pricing became the standard price, and the increase to $3/$15 once
+# scheduled for 2026-09-01 was cancelled.
+#
+# **Why this is not pedantry.** Cost enters this lab twice: as a **ratio** in the leaderboard score,
+# and as an **absolute** in the steering-committee slide. Sonnet is the workhorse of every optimized
+# config while the v0 baseline is Opus — which was priced correctly. So the stale row overpriced the
+# numerator and not the denominator: it *understated* every optimized score by up to 1.5× on the cost
+# half, and *overstated* the per-contract COGS quoted to the client. A wrong price table doesn't fail
+# loudly; it just makes you lose the leaderboard and over-quote the CFO at the same time.
+#
+# The notebook's own markdown says "verify against the pricing page before quoting in a deliverable."
+# This is that instruction, actually followed.
+#
+# **Also recorded here:** the 1-hour cache TTL write multiplier (2.0×, vs 1.25× for 5-minute). The
+# shipped table only carries the 5-minute figure, which silently assumes an interactive workload. The
+# overnight batch lane in Part 4 is the case where 1h is the right choice — see Lever 1.
 
 # %%
+# Rates verified 2026-08-28 against platform.claude.com/docs/en/about-claude/pricing.
+# The Sonnet row shipped as 3.00/15.00 — that is the Sonnet 4.6 rate. Corrected. See the
+# decision log above for why a stale row here costs you twice.
 PRICING = {
-    MODEL_HAIKU:  {"input": 1.00, "output": 5.00},
-    MODEL_SONNET: {"input": 3.00, "output": 15.00},
-    MODEL_OPUS:   {"input": 5.00, "output": 25.00},
+    MODEL_HAIKU:  {"input": 1.00, "output":  5.00},   # verified 2026-08-28
+    MODEL_SONNET: {"input": 2.00, "output": 10.00},   # verified 2026-08-28 (was 3.00/15.00)
+    MODEL_OPUS:   {"input": 5.00, "output": 25.00},   # verified 2026-08-28
 }
-CACHE_WRITE_MULT = 1.25   # 5-minute TTL cache writes
+PRICING_VERIFIED_ON = "2026-08-28"
+PRICING_SOURCE = "platform.claude.com/docs/en/about-claude/pricing"
+
+CACHE_WRITE_MULT = 1.25      # 5-minute TTL cache write  — pays back after ~1 read
+CACHE_WRITE_MULT_1H = 2.00   # 1-hour TTL cache write    — pays back after ~2 reads
 CACHE_READ_MULT = 0.10
-BATCH_DISCOUNT = 0.50     # Batch API: 50% off all token charges
+BATCH_DISCOUNT = 0.50        # Batch API: 50% off all token charges
 
 
-def calculate_cost(model: str, usage) -> float:
-    """Fully loaded cost in dollars for one API call, including cache economics."""
+def calculate_cost(model: str, usage, cache_ttl: str = "5m", batch: bool = False) -> float:
+    """Fully loaded cost in dollars for one API call, including cache economics.
+
+    cache_ttl: "5m" (1.25x write) or "1h" (2.0x write). Defaults to 5m to match the
+               shipped behaviour — but the default is now an explicit choice, not an
+               unstated assumption baked into a constant.
+    batch:     apply the Batch API 50% discount to every term.
+    """
     p = PRICING[model]
+    write_mult = CACHE_WRITE_MULT_1H if cache_ttl == "1h" else CACHE_WRITE_MULT
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-    return (
+    cost = (
         usage.input_tokens * p["input"]
-        + cache_write * p["input"] * CACHE_WRITE_MULT
+        + cache_write * p["input"] * write_mult
         + cache_read * p["input"] * CACHE_READ_MULT
         + usage.output_tokens * p["output"]
     ) / 1e6
+    return cost * BATCH_DISCOUNT if batch else cost
 
 
 def measure(prompt: str, model: str, test_name: str, max_tokens: int = 256) -> BenchmarkResult:
@@ -469,6 +519,7 @@ def measure(prompt: str, model: str, test_name: str, max_tokens: int = 256) -> B
     )
 
 
+print(f"Pricing table verified {PRICING_VERIFIED_ON} against {PRICING_SOURCE}")
 print(f"Cost of the 2+2 call above: ${calculate_cost(MODEL_SONNET, resp.usage):.6f}")
 
 # %% [markdown]
@@ -785,6 +836,77 @@ print("Grader ready — 5 audited fields × 6 contracts = 30 checks; gate is ≥
 # **ClauseScan v0 — exactly as inherited.** Read it the way you'd read a client's codebase on
 # day one of a rescue: not to mock it, but to find where the money and the seconds go.
 
+# %% [markdown]
+# ### 🧭 Decision log — the truncation guard, and the measurement that motivated it
+#
+# `extract_json` returns `None` when it can't find JSON. A truncated response therefore scores
+# **0/5 and looks exactly like a comprehension failure.** That is the worst possible failure mode for
+# an accuracy gate: the number goes down, and the number gives you no way to find out why.
+#
+# I went looking for how a response could get truncated on a 5-field extraction with generous
+# `max_tokens`, and found it. Measured 2026-08-28 on `anthropic` 1.1.0, contract-extraction prompt
+# (easy) and a combinatorial puzzle (hard):
+#
+# | Model | `thinking` param | Prompt | `thinking` block? | out tokens | `stop_reason` |
+# |---|---|---|---|---|---|
+# | Sonnet 5 | omitted | easy | no | 605 | `end_turn` |
+# | Sonnet 5 | `adaptive` (explicit) | easy | no | 699 | `end_turn` |
+# | Opus 4.8 | omitted | easy | no | 577 | `end_turn` |
+# | Opus 4.8 | `adaptive` (explicit) | easy | **yes** | 750 | `end_turn` |
+# | Sonnet 5 | omitted | **hard** | **yes** | **800 (= cap)** | **`max_tokens`** |
+# | Sonnet 5 | `adaptive` (explicit) | **hard** | **yes** | 4000 (= cap) | `max_tokens` |
+# | Sonnet 5 | `effort="low"` | **hard** | **yes** | 4000 (= cap) | `max_tokens` |
+#
+# **What this actually shows** — and it is *not* what I expected going in:
+#
+# 1. **Adaptive thinking on Sonnet 5 is on by default, but it is genuinely adaptive.** With
+#    `thinking` omitted it produced no thinking block at all on the easy prompt, and a large one on
+#    the hard prompt. So there is no flat "thinking tax" to subtract from every call. I had assumed a
+#    constant surcharge; the measurement says otherwise. Recording the correction rather than the
+#    assumption.
+# 2. **`effort="low"` did not suppress it.** The effort dial modulates *how much*, not *whether*, and
+#    on the hard prompt it still ran to the cap. Do not reach for `effort` as a truncation fix.
+# 3. **The real risk is variance, not average cost.** On routine contracts thinking costs nothing.
+#    On the one contract that confuses the model, it can consume the entire `max_tokens` budget —
+#    and the confirmed result is `stop_reason="max_tokens"` with **one `thinking` block and zero
+#    `text` blocks**. No JSON. No answer. Silent 0/5.
+#
+# That is the coupling worth internalising: **the levers that cut cost (a cheaper model, a tighter
+# `max_tokens`) are the same levers that make this failure more likely**, and it lands on the hardest
+# contracts — the ones that decide whether you clear a 90% gate. So the guard goes in *before* the
+# optimization sprint, not after.
+
+# %%
+class Truncated(RuntimeError):
+    """Raised when a response stops on max_tokens instead of finishing.
+
+    Carries the cost and call count already incurred, so a truncated run still shows up
+    honestly in the cost column rather than looking free.
+    """
+    def __init__(self, message, cost=0.0, calls=0):
+        super().__init__(message)
+        self.cost, self.calls = cost, calls
+
+
+def guard(response, model, *, cost=0.0, calls=0, where=""):
+    """Fail loudly on truncation; return the response otherwise.
+
+    The guard is behaviour-preserving on any run that was not already broken: if nothing
+    truncates, every pipeline behaves exactly as before. All it removes is the ability to
+    score a truncated response as a wrong answer.
+    """
+    if response.stop_reason == "max_tokens":
+        kinds = [b.type for b in response.content]
+        raise Truncated(
+            f"stop_reason=max_tokens at {where or model} "
+            f"(blocks={kinds}, out={response.usage.output_tokens}) — "
+            f"raise max_tokens or lower thinking effort; do NOT grade this as a wrong answer",
+            cost=cost, calls=calls)
+    return response
+
+
+print("Truncation guard armed — max_tokens stops now raise instead of scoring 0/5")
+
 # %%
 EXTRACT_INSTRUCTION = (
     "Determine the five audited fields for the contract below. Respond with a JSON object "
@@ -809,6 +931,8 @@ def clausescan_v0(contract: dict) -> dict:
                    + contract["text"]}],
     )
     calls.append((MODEL_OPUS, r1.usage))
+    guard(r1, MODEL_OPUS, cost=sum(calculate_cost(m, u) for m, u in calls),
+          calls=len(calls), where="v0 pass 1 (briefing)")
 
     # PASS 2 — extraction, with the briefing AND the contract AND the playbook again
     r2 = client.messages.create(
@@ -822,6 +946,8 @@ def clausescan_v0(contract: dict) -> dict:
                    + contract["text"]}],
     )
     calls.append((MODEL_OPUS, r2.usage))
+    guard(r2, MODEL_OPUS, cost=sum(calculate_cost(m, u) for m, u in calls),
+          calls=len(calls), where="v0 pass 2 (extraction)")
 
     return {
         "fields": extract_json(text_of(r2)),
@@ -830,7 +956,7 @@ def clausescan_v0(contract: dict) -> dict:
     }
 
 
-print("ClauseScan v0 loaded — run the portfolio in the next cell")
+print("ClauseScan v0 loaded (guarded — unchanged behaviour unless it truncates)")
 
 # %%
 def run_portfolio(pipeline, contracts=CONTRACTS, gold=GOLD, workers: int = 0,
@@ -838,11 +964,25 @@ def run_portfolio(pipeline, contracts=CONTRACTS, gold=GOLD, workers: int = 0,
     """Run a pipeline over the contract sample; grade, time, and price every contract."""
 
     def run_one(contract):
-        out = pipeline(contract)
+        try:
+            out = pipeline(contract)
+        except Truncated as e:
+            # A truncated response is an INFRASTRUCTURE failure, not a comprehension failure.
+            # Left unguarded it returns None fields and scores a silent 0/5 — indistinguishable
+            # from the model simply being wrong, which is the single most misleading thing an
+            # accuracy number can hide. Surface it and exclude it from the denominator.
+            return {"id": contract["id"], "vendor": contract["vendor"], "error": str(e),
+                    "fields": None, "checks": {}, "n_correct": 0, "n_fields": 0,
+                    "elapsed": float("nan"), "cost": e.cost, "calls": e.calls}
+        except Exception as e:  # transport / rate-limit / API errors
+            return {"id": contract["id"], "vendor": contract["vendor"],
+                    "error": f"{type(e).__name__}: {e}",
+                    "fields": None, "checks": {}, "n_correct": 0, "n_fields": 0,
+                    "elapsed": float("nan"), "cost": 0.0, "calls": 0}
         checks = grade_fields(out["fields"], gold[contract["id"]])
         return {
             "id": contract["id"], "vendor": contract["vendor"],
-            "fields": out["fields"], "checks": checks,
+            "fields": out["fields"], "checks": checks, "error": None,
             "n_correct": sum(checks.values()), "n_fields": len(checks),
             "elapsed": out["elapsed"],
             "cost": sum(calculate_cost(m, u) for m, u in out["calls"]),
@@ -864,11 +1004,20 @@ def run_portfolio(pipeline, contracts=CONTRACTS, gold=GOLD, workers: int = 0,
         rows = [run_one(c) for c in contracts]
     wall = time.perf_counter() - wall0
 
-    total_fields = sum(r["n_fields"] for r in rows)
+    ok = [r for r in rows if not r.get("error")]
+    errors = [r for r in rows if r.get("error")]
+    total_fields = sum(r["n_fields"] for r in ok)
+    if not ok:
+        raise RuntimeError(f"every contract errored: {[r['error'] for r in errors]}")
     return {
         "rows": rows,
-        "accuracy": sum(r["n_correct"] for r in rows) / total_fields,
-        "p50_s": statistics.median(r["elapsed"] for r in rows),
+        # Denominator is graded fields only. An errored contract does NOT quietly count as
+        # 5 wrong answers — it counts as a run that did not produce a gradeable result, and
+        # it is reported separately so it cannot hide inside an accuracy percentage.
+        "accuracy": sum(r["n_correct"] for r in ok) / total_fields,
+        "n_errors": len(errors),
+        "errors": [f"{r['id']}: {r['error']}" for r in errors],
+        "p50_s": statistics.median(r["elapsed"] for r in ok),
         "cost_per_contract": sum(r["cost"] for r in rows) / len(rows),
         "total_cost": sum(r["cost"] for r in rows),
         "wall_s": wall,
@@ -876,8 +1025,10 @@ def run_portfolio(pipeline, contracts=CONTRACTS, gold=GOLD, workers: int = 0,
 
 
 def print_report(report: dict, label: str):
-    rows = [[r["id"], r["vendor"][:28], f"{r['n_correct']}/{r['n_fields']}",
-             f"{r['elapsed']:.1f}s", f"${r['cost']:.4f}", r["calls"]]
+    rows = [[r["id"], r["vendor"][:28],
+             "ERROR" if r.get("error") else f"{r['n_correct']}/{r['n_fields']}",
+             "—" if r.get("error") else f"{r['elapsed']:.1f}s",
+             f"${r['cost']:.4f}", r["calls"]]
             for r in report["rows"]]
     print(f"\n── {label} " + "─" * max(1, 64 - len(label)))
     print(tabulate(rows, headers=["ID", "Vendor", "Fields", "TTC", "Cost", "Calls"],
@@ -885,16 +1036,232 @@ def print_report(report: dict, label: str):
     print(f"\n  accuracy {report['accuracy']*100:.0f}%   ·   p50 {report['p50_s']:.1f}s/contract"
           f"   ·   ${report['cost_per_contract']:.4f}/contract"
           f"   ·   batch wall-clock {report['wall_s']:.0f}s")
+    if report.get("n_errors"):
+        print(f"  ⚠️  {report['n_errors']} contract(s) excluded from the accuracy denominator: "
+              f"{report['errors']}")
 
 
-print("Running ClauseScan v0 on the six-contract sample (sequential, ~2-4 minutes — "
-      "the slowness IS the data)...")
-BASELINE = run_portfolio(clausescan_v0)
-print_report(BASELINE, "ClauseScan v0 — the inherited baseline")
+print("Portfolio runner ready (hardened: truncation guard + errors excluded from the "
+      "accuracy denominator). The baseline itself is measured and frozen two cells down.")
+
+# %% [markdown]
+# ### 🧭 Decision log — a gate you only pull once is a coin flip wearing a lab coat
+#
+# The shipped gate is **27/30 field checks on a single run**. Three things follow, and all three get
+# worse as the sprint progresses:
+#
+# 1. **Resolution.** 30 checks means accuracy moves in **3.3-point steps**. There is no such thing as
+#    "91%" here. The holdout is worse: 2 contracts × 5 fields = **10 checks**, so *one* miss is
+#    exactly 90% and *two* is a fail. Any claim finer than that granularity is invented.
+# 2. **No repeats.** One run cannot distinguish "this config is 93% accurate" from "this config got
+#    lucky once." The API is not deterministic, and nothing here pins a seed.
+# 3. **Variance rises exactly as the gate matters more.** Every lever in Part 4 — cheaper model, less
+#    thinking, tighter `max_tokens` — *increases* run-to-run spread. So the instrument gets noisier at
+#    precisely the moment the decision gets tighter.
+#
+# So: run each config **k times** and gate on the **conservative** statistic, carrying over
+# `pass@k` / `pass^k` from the evals exercise.
+#
+# - **`pass@k`** — passed at least once in k runs. Optimistic. Right for "can it do this at all?"
+# - **`pass^k`** — passed in **every** one of k runs. Pessimistic. Right for "will it hold at 3am on
+#   contract 190,000 of 248,000?"
+#
+# A config whose *mean* accuracy is 93% but whose *min* is 87% has not cleared a 90% SLA — it has
+# failed it intermittently. On a 248,000-document estate, "intermittently below spec" is roughly
+# **32,000 documents** reviewed by a pipeline that was out of contract. That is the sentence that
+# matters at the steering committee, and only the min tells you to say it.
+#
+# Practical budget note: run the ladder at **k=1–2** while turning dials, and **k=5** only on
+# finalists. Spending k=5 on every rung buys precision about configs you're going to discard.
+
+# %%
+def run_portfolio_k(pipeline, k: int = 3, contracts=CONTRACTS, gold=GOLD, **kw) -> dict:
+    """Run a config k times and report the distribution, not a single lucky number.
+
+    Returns mean / min / max accuracy, per-field pass^k, and the medians of p50 and
+    cost across runs. Gate on `acc_min` (or `passk_accuracy`), never on `acc_mean`.
+    """
+    runs = [run_portfolio(pipeline, contracts=contracts, gold=gold, **kw) for _ in range(k)]
+
+    # pass^k per (contract, field): correct in EVERY run. Errored runs count as not-passed
+    # for pass^k — an intermittent crash is an intermittent failure of the deliverable.
+    always, ever, total = 0, 0, 0
+    for c in contracts:
+        cid = c["id"]
+        per_run = []
+        for r in runs:
+            row = next((x for x in r["rows"] if x["id"] == cid), None)
+            per_run.append(row["checks"] if row and not row.get("error") else {})
+        for field in gold[cid]:
+            total += 1
+            got = [chk.get(field, False) for chk in per_run]
+            always += all(got)
+            ever += any(got)
+
+    accs = [r["accuracy"] for r in runs]
+    return {
+        "k": k, "runs": runs,
+        "acc_mean": statistics.mean(accs),
+        "acc_min": min(accs),
+        "acc_max": max(accs),
+        "acc_stdev": statistics.stdev(accs) if k > 1 else 0.0,
+        "passk_accuracy": always / total,   # pass^k — every run correct
+        "pass_at_k": ever / total,          # pass@k — at least one run correct
+        "p50_s": statistics.median(r["p50_s"] for r in runs),
+        "cost_per_contract": statistics.median(r["cost_per_contract"] for r in runs),
+        "total_cost": sum(r["total_cost"] for r in runs),
+        "n_errors": sum(r["n_errors"] for r in runs),
+        "n_checks": total,
+    }
+
+
+def print_k_report(rep: dict, label: str):
+    print(f"\n── {label}  (k={rep['k']}) " + "─" * max(1, 52 - len(label)))
+    print(f"  accuracy   mean {rep['acc_mean']*100:5.1f}%   min {rep['acc_min']*100:5.1f}%   "
+          f"max {rep['acc_max']*100:5.1f}%   sd {rep['acc_stdev']*100:.1f}pp")
+    print(f"  pass^k     {rep['passk_accuracy']*100:5.1f}%  (correct in ALL {rep['k']} runs, "
+          f"n={rep['n_checks']} field-checks)")
+    print(f"  pass@k     {rep['pass_at_k']*100:5.1f}%  (correct in at least one run)")
+    print(f"  p50 {rep['p50_s']:.1f}s/contract   ·   ${rep['cost_per_contract']:.4f}/contract"
+          f"   ·   ${rep['total_cost']:.4f} spent over {rep['k']} runs")
+    if rep["n_errors"]:
+        print(f"  ⚠️  {rep['n_errors']} errored contract-run(s) across the k runs")
+    # Gate on the conservative statistic. This is the whole point of the cell.
+    verdict = "PASS" if rep["acc_min"] >= 0.90 else "FAIL"
+    print(f"  GATE (min accuracy ≥ 90%): {verdict}"
+          + ("" if verdict == "PASS" else
+             f"   ← mean of {rep['acc_mean']*100:.1f}% would have hidden this"))
+
+
+print("k-repeat harness ready — gate on acc_min / pass^k, never on acc_mean")
+
+# %% [markdown]
+# ### 🧭 Decision log — freeze the baseline, or every score you quote is unanchored
+#
+# `BASELINE` shipped as a module-level global, measured fresh on every **Run All**. Every leaderboard
+# number in this notebook is a *ratio* against it:
+#
+# `SCORE = 50 × (baseline $ / your $) + 50 × (baseline p50 / your p50)`
+#
+# So if you re-run tomorrow, v0 is re-measured against a different day's API latency and queue depth,
+# and **every historical score silently re-anchors**. Your "412" becomes a "389" with no code change,
+# and you have no way to tell whether you regressed or the denominator moved. Worse, it moves in the
+# direction that flatters you: a slow baseline day inflates every optimized score.
+#
+# Fix: measure v0 **once**, write it to disk with a fingerprint, and load it thereafter. Same instinct
+# as the sha-frozen corpus in `01_evals` — **a baseline you can't reproduce isn't a baseline, it's an
+# anecdote.**
+#
+# The fingerprint records everything that would invalidate the comparison: git sha, model IDs, the
+# (now corrected) pricing table, a hash of the contract set, the SDK version, and the timestamp. If
+# any of those change, the stored baseline is no longer comparable and the cell says so out loud
+# rather than quietly serving a stale number.
+#
+# The JSON is gitignored — the executed cell output is the evidence, matching the `eval_results/`
+# precedent from `01_evals`. The fingerprint is printed, so it survives in the committed notebook.
+
+# %%
+BASELINE_PATH = pathlib.Path("baseline_v0.json")
+
+
+def _fingerprint() -> dict:
+    """Everything that, if it changed, would make a stored baseline incomparable."""
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=10).stdout.strip() or "unknown"
+    except Exception:
+        sha = "unknown"
+    corpus = hashlib.sha256(
+        json.dumps([{"id": c["id"], "text": c["text"]} for c in CONTRACTS],
+                   sort_keys=True).encode()
+    ).hexdigest()[:12]
+    return {
+        "git_sha": sha,
+        "corpus_sha256_12": corpus,
+        "models": {"haiku": MODEL_HAIKU, "sonnet": MODEL_SONNET, "opus": MODEL_OPUS},
+        "pricing": {k: v for k, v in PRICING.items()},
+        "pricing_verified_on": PRICING_VERIFIED_ON,
+        "anthropic_sdk": anthropic.__version__,
+        "pipeline": "clausescan_v0",
+    }
+
+
+def _slim(report: dict) -> dict:
+    """Persistable view of a report — drop raw model output, keep the numbers and the grades."""
+    return {
+        "accuracy": report["accuracy"], "p50_s": report["p50_s"],
+        "cost_per_contract": report["cost_per_contract"],
+        "total_cost": report["total_cost"], "wall_s": report["wall_s"],
+        "n_errors": report.get("n_errors", 0), "errors": report.get("errors", []),
+        "rows": [{"id": r["id"], "vendor": r["vendor"], "n_correct": r["n_correct"],
+                  "n_fields": r["n_fields"], "elapsed": r["elapsed"], "cost": r["cost"],
+                  "calls": r["calls"], "checks": r.get("checks", {}),
+                  "error": r.get("error")} for r in report["rows"]],
+    }
+
+
+fp_now = _fingerprint()
+
+if BASELINE_PATH.exists():
+    stored = json.loads(BASELINE_PATH.read_text())
+    BASELINE = stored["report"]
+    drift = {k: (stored["fingerprint"].get(k), fp_now.get(k))
+             for k in fp_now if stored["fingerprint"].get(k) != fp_now.get(k)}
+    print(f"Loaded frozen baseline from {BASELINE_PATH} "
+          f"(measured {stored['measured_at_utc']})")
+    if drift:
+        print("  ⚠️  FINGERPRINT DRIFT — the stored baseline may not be comparable:")
+        for k, (was, now) in drift.items():
+            print(f"      {k}: stored={was!r}  now={now!r}")
+        print("      Delete baseline_v0.json to re-measure if this matters.")
+else:
+    print("No frozen baseline found. Running ClauseScan v0 on the six-contract sample "
+          "(sequential, ~2-4 minutes — the slowness IS the data)...")
+    report = run_portfolio(clausescan_v0)
+    BASELINE = _slim(report)
+    BASELINE_PATH.write_text(json.dumps(
+        {"measured_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+         "fingerprint": fp_now, "report": BASELINE}, indent=2))
+    print(f"Measured and froze baseline → {BASELINE_PATH}")
+
+print_report(BASELINE, "ClauseScan v0 — the inherited baseline (FROZEN)")
 
 sla_p50 = "PASS" if BASELINE["p50_s"] <= 5 else "FAIL"
 print(f"\n  SLA check: p50 ≤ 5s → {sla_p50}   ·   accuracy ≥ 90% → "
-      f"{'PASS' if BASELINE['accuracy'] >= 0.9 else 'FAIL'}")
+      f"{'PASS' if BASELINE['accuracy'] >= 0.9 else 'FAIL'}"
+      f"   ·   COGS ≤ $0.02 → "
+      f"{'PASS' if BASELINE['cost_per_contract'] <= 0.02 else 'FAIL'}")
+print("\n  Baseline fingerprint (this is what every score below is anchored to):")
+for k, v in fp_now.items():
+    print(f"    {k}: {v}")
+
+
+# ── The same discipline, generalised ──────────────────────────────────
+# Every expensive block below (the ablation ladder, the router eval, the k=5 finalists) is
+# a *measurement*, not a computation: re-running it re-bills the API AND re-rolls the dice.
+# Memoize each one behind the same fingerprint as the baseline, so "Run All" stays
+# idempotent and cheap — and so a number quoted in the writeup is the number that was
+# actually measured, not a fresh sample that happens to look similar.
+RESULTS_DIR = pathlib.Path("run_cache")
+
+
+def freeze_result(name: str, compute, force: bool = False):
+    """Measure once, record with a fingerprint, reload thereafter."""
+    RESULTS_DIR.mkdir(exist_ok=True)
+    path = RESULTS_DIR / f"{name}.json"
+    if path.exists() and not force:
+        blob = json.loads(path.read_text())
+        drift = [k for k, v in _fingerprint().items() if blob["fingerprint"].get(k) != v]
+        print(f"\u21ba loaded '{name}' from {path}  (measured {blob['measured_at_utc']})")
+        if drift:
+            print(f"   \u26a0\ufe0f  fingerprint drift on {drift} \u2014 delete {path} to re-measure")
+        return blob["result"]
+    result = compute()
+    path.write_text(json.dumps(
+        {"measured_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+         "fingerprint": _fingerprint(), "result": result}, indent=2))
+    print(f"\u2713 measured and froze '{name}' \u2192 {path}")
+    return result
 
 # %% [markdown]
 # **The diagnosis.** v0 is *correct* — and that's exactly what makes it dangerous: nothing
@@ -1002,6 +1369,7 @@ def triage(contract):
         messages=[{"role": "user", "content": contract["text"]}],
         output_config={"format": TRIAGE_SCHEMA},
     )
+    guard(resp, MODEL_HAIKU, calls=1, where="triage")
     verdict = extract_json(text_of(resp)) or {}
     return verdict.get("complexity", "COMPLEX"), resp  # fail safe: unknown → COMPLEX
 
@@ -1067,6 +1435,8 @@ def extract_structured(contract, model=MODEL_SONNET, cached=True, effort=None):
         messages=[{"role": "user", "content": EXTRACT_INSTRUCTION + contract["text"]}],
         output_config=output_config,
     )
+    guard(resp, model, cost=calculate_cost(model, resp.usage), calls=1,
+          where=f"extract_structured({model}, effort={effort})")
     return {"fields": extract_json(text_of(resp)), "calls": [(model, resp.usage)],
             "elapsed": time.perf_counter() - t0}
 
@@ -1218,7 +1588,37 @@ CONFIG = {
 
     # Lever 5 — portfolio concurrency (0 = sequential; warm-first is automatic)
     "parallel_workers": 0,
+
+    # ── Beyond the notebook's six levers (see the decision log below) ──────────
+    "derive_risk_tier": False,   # compute risk_tier in Python; stop paying a model for an `if`
+    "drop_evidence": False,      # raises the score, deletes the audit trail. Read the log first.
 }
+
+
+def derive_risk_tier(fields: dict) -> str:
+    """The playbook's own rule, executed rather than inferred.
+
+    HIGH = change-of-control restriction AND no cap · MEDIUM = exactly one · LOW = neither.
+    Both inputs are already extracted, so asking the model for this field buys nothing and
+    costs three things: output tokens, latency, and a failure mode that can disagree with the
+    very fields it is derived from (a HIGH tier next to a stated $250K cap).
+    """
+    flags = (int(bool(fields.get("change_of_control")))
+             + int(_normalize_cap(fields.get("liability_cap_usd")) is None))
+    return {2: "HIGH", 1: "MEDIUM", 0: "LOW"}[flags]
+
+
+def extraction_schema(derive_tier: bool = False, drop_evidence: bool = False) -> dict:
+    """EXTRACTION_SCHEMA with fields removed — the schema IS the output contract, so the
+    cheapest way to stop paying for a field is to stop asking for it."""
+    props = dict(EXTRACTION_SCHEMA["schema"]["properties"])
+    if derive_tier:
+        props.pop("risk_tier", None)
+    if drop_evidence:
+        props.pop("evidence", None)
+    return {"type": "json_schema",
+            "schema": {"type": "object", "properties": props,
+                       "required": list(props), "additionalProperties": False}}
 
 
 def clausescan_v1(contract: dict) -> dict:
@@ -1238,7 +1638,8 @@ def clausescan_v1(contract: dict) -> dict:
 
     if CONFIG["structured_single_pass"]:
         # Levers 3 + 4 — one pass, schema output, optional effort dial
-        output_config = {"format": EXTRACTION_SCHEMA}
+        output_config = {"format": extraction_schema(CONFIG["derive_risk_tier"],
+                                                     CONFIG["drop_evidence"])}
         if CONFIG["effort"] and model != MODEL_HAIKU:
             output_config["effort"] = CONFIG["effort"]
         resp = client.messages.create(
@@ -1247,7 +1648,11 @@ def clausescan_v1(contract: dict) -> dict:
             output_config=output_config,
         )
         calls.append((model, resp.usage))
+        guard(resp, model, cost=sum(calculate_cost(m, u) for m, u in calls),
+              calls=len(calls), where=f"v1 single pass ({model})")
         fields = extract_json(text_of(resp))
+        if CONFIG["derive_risk_tier"] and fields:
+            fields["risk_tier"] = derive_risk_tier(fields)
     else:
         # v0's two-pass flow, verbatim
         r1 = client.messages.create(
@@ -1258,6 +1663,8 @@ def clausescan_v1(contract: dict) -> dict:
                        + contract["text"]}],
         )
         calls.append((model, r1.usage))
+        guard(r1, model, cost=sum(calculate_cost(m, u) for m, u in calls),
+              calls=len(calls), where="v1 pass 1")
         r2 = client.messages.create(
             model=model, max_tokens=CONFIG["max_tokens"], system=system,
             messages=[{"role": "user", "content":
@@ -1268,6 +1675,8 @@ def clausescan_v1(contract: dict) -> dict:
                        + contract["text"]}],
         )
         calls.append((model, r2.usage))
+        guard(r2, model, cost=sum(calculate_cost(m, u) for m, u in calls),
+              calls=len(calls), where="v1 pass 2")
         fields = extract_json(text_of(r2))
 
     return {"fields": fields, "calls": calls, "elapsed": time.perf_counter() - t0}
@@ -1296,6 +1705,10 @@ def run_scorecard(pipeline, label="clausescan_v1", contracts=CONTRACTS, gold=GOL
         levers.append(f"effort-{CONFIG['effort']}")
     if CONFIG.get("parallel_workers"):
         levers.append(f"parallel-x{CONFIG['parallel_workers']}")
+    if CONFIG.get("derive_risk_tier"):
+        levers.append("derived-tier")
+    if CONFIG.get("drop_evidence"):
+        levers.append("no-evidence")
     gate = "" if report["accuracy"] >= 0.90 else "  ⛔ accuracy gate failed — score zeroed"
     print(f"\n  ENGAGEMENT SCORE: {score}  (v0 baseline = 100){gate}")
     print(f"  📋 leaderboard line →  SCORE {score} · acc {report['accuracy']*100:.0f}% · "
@@ -1307,7 +1720,390 @@ def run_scorecard(pipeline, label="clausescan_v1", contracts=CONTRACTS, gold=GOL
 print("Sprint harness ready. Edit CONFIG above, then run the next cell. Repeat until proud.")
 
 # %%
-my_report = run_scorecard(clausescan_v1)
+# Rung 0 of the ablation ladder below IS this measurement — an unmodified CONFIG is a v0
+# clone. Running it here too would spend another ~$0.95 of Opus two-pass calls to learn a
+# number we are about to measure anyway, so it is off by default. Flip it if you want the
+# notebook's original single-shot flow.
+RUN_UNTUNED_V1 = False
+
+if RUN_UNTUNED_V1:
+    my_report = run_scorecard(clausescan_v1)
+else:
+    print("Skipped — the untuned CONFIG is a v0 clone and is measured as rung 0 of the "
+          "ablation ladder below.\nSet RUN_UNTUNED_V1 = True to run it here instead.")
+
+# %% [markdown]
+# ### 🧭 Decision log — an ablation ladder, not a before/after
+#
+# The notebook's suggested path turns several dials and re-runs the scorecard. That gives you a
+# **bundled A/B**: v0 → v1, one big number, no idea which change bought it. In `01_evals` the same
+# shortcut would have reported "57% → 86%" when the honest ladder showed **57 → 57 → 86 → 86** — two
+# of the four changes bought exactly nothing, and the bundled number credited them anyway.
+#
+# So: a **ladder**. Each rung adds **exactly one variable** to the rung below it, scored the same way
+# against the same frozen baseline.
+#
+# | Rung | Adds | Isolates |
+# |---|---|---|
+# | 0 | v0 verbatim | the anchor — must score ≈ 100 |
+# | 1 | `structured_single_pass` | the **round-trip collapse** alone (`max_tokens` still 8000) |
+# | 2 | `max_tokens` 8000 → 1000 | **output right-sizing** alone |
+# | 3 | `cache_playbook` | **prefix caching** alone |
+# | 4 | Opus → Sonnet | the **model swap** alone (watch accuracy) |
+# | 5 | `effort="low"` | the **thinking dial** alone |
+# | 6 | triage routing → Haiku/Sonnet | **routing** alone (highest accuracy risk) |
+# | 7 | `derive_risk_tier` | doing an `if` **in code** instead of in a model |
+# | 8 | `parallel_workers=4` | **concurrency** — expected null on score, see below |
+#
+# Two predictions worth writing down *before* running, so the ladder can falsify them:
+#
+# - **Rung 8 buys ~nothing on the score.** `engagement_score` reads `report["p50_s"]` — the *median
+#   per-contract elapsed time* — not wall-clock. Concurrency moves wall-clock. It should move the
+#   score by roughly zero, and may move it *down* under contention. Its real contribution is
+#   `warm_first=True`, which is already on.
+# - **Rung 5 may buy less than expected.** The measurement above showed `effort="low"` does not
+#   suppress adaptive thinking, and these contracts are short enough that Sonnet mostly declines to
+#   think anyway.
+#
+# A ladder that confirms every prediction taught you nothing. The interesting rungs are the null ones.
+#
+# Run at **k=2** where it's cheap and **k=1** on the two Opus-heavy rungs; finalists get **k=5** after.
+
+# %%
+from contextlib import contextmanager
+
+
+@contextmanager
+def with_config(**overrides):
+    """Temporarily patch CONFIG. Restores on exit — so a failed rung can't silently
+    contaminate every rung after it, which is the classic way an ablation ladder lies."""
+    saved = dict(CONFIG)
+    CONFIG.update(overrides)
+    try:
+        yield
+    finally:
+        CONFIG.clear()
+        CONFIG.update(saved)
+
+
+V0_CONFIG = {
+    "triage_routing": False, "routine_model": MODEL_OPUS, "complex_model": MODEL_OPUS,
+    "cache_playbook": False, "structured_single_pass": False, "max_tokens": 8000,
+    "effort": None, "parallel_workers": 0, "derive_risk_tier": False, "drop_evidence": False,
+}
+
+# Each rung is (label, {the ONE thing that changes vs the rung above}, k)
+RUNGS = [
+    ("0 · v0 verbatim (anchor)",       {},                                                  1),
+    ("1 · + collapse round trip",      {"structured_single_pass": True},                    1),
+    ("2 · + right-size max_tokens",    {"max_tokens": 1000},                                2),
+    ("3 · + cache the playbook",       {"cache_playbook": True},                            2),
+    ("4 · + Sonnet instead of Opus",   {"routine_model": MODEL_SONNET,
+                                        "complex_model": MODEL_SONNET},                     2),
+    ("5 · + effort=low",               {"effort": "low"},                                   2),
+    ("6 · + triage routing to Haiku",  {"triage_routing": True,
+                                        "routine_model": MODEL_HAIKU},                      2),
+    ("7 · + derive risk_tier in code", {"derive_risk_tier": True},                          2),
+    ("8 · + parallel workers",         {"parallel_workers": 4},                             2),
+]
+
+
+def run_ladder(rungs=RUNGS, contracts=CONTRACTS, gold=GOLD):
+    """Climb the ladder, accumulating one change per rung. Returns a row per rung."""
+    cfg, results = dict(V0_CONFIG), []
+    for label, delta, k in rungs:
+        cfg.update(delta)
+        with with_config(**cfg):
+            rep = run_portfolio_k(clausescan_v1, k=k, contracts=contracts, gold=gold,
+                                  workers=CONFIG["parallel_workers"])
+        # Gate and score on the CONSERVATIVE statistic, not the mean.
+        score = (0 if rep["acc_min"] < 0.90 else
+                 round(50 * BASELINE["cost_per_contract"] / max(rep["cost_per_contract"], 1e-9)
+                       + 50 * BASELINE["p50_s"] / max(rep["p50_s"], 1e-9)))
+        wall = statistics.median(r["wall_s"] for r in rep["runs"])
+        results.append({"rung": label, "k": k, "score": score,
+                        "acc_mean": rep["acc_mean"], "acc_min": rep["acc_min"],
+                        "passk": rep["passk_accuracy"], "p50": rep["p50_s"],
+                        "wall": wall, "cost": rep["cost_per_contract"],
+                        "spend": rep["total_cost"], "errors": rep["n_errors"],
+                        "delta": ", ".join(f"{k2}={v}" for k2, v in delta.items()) or "—"})
+        r = results[-1]
+        print(f"{label:34s} k={k}  score {r['score']:>4}  "
+              f"acc {r['acc_mean']*100:5.1f}% (min {r['acc_min']*100:5.1f}%)  "
+              f"p50 {r['p50']:5.1f}s  wall {r['wall']:5.1f}s  ${r['cost']:.4f}/contract",
+              flush=True)
+    return results
+
+
+def print_ladder(results):
+    prev = None
+    rows = []
+    for r in results:
+        d_score = "—" if prev is None else f"{r['score'] - prev['score']:+d}"
+        d_cost = "—" if prev is None else f"{(r['cost']/prev['cost'] - 1)*100:+.0f}%"
+        rows.append([r["rung"], r["k"], r["score"], d_score,
+                     f"{r['acc_mean']*100:.1f}%", f"{r['acc_min']*100:.1f}%",
+                     f"{r['passk']*100:.1f}%", f"{r['p50']:.1f}s", f"{r['wall']:.0f}s",
+                     f"${r['cost']:.4f}", d_cost])
+        prev = r
+    print(tabulate(rows, headers=["Rung", "k", "Score", "Δscore", "acc mean", "acc min",
+                                  "pass^k", "p50", "wall", "$/contract", "Δ$"],
+                   tablefmt="simple"))
+    print(f"\n  Total ladder spend: ${sum(r['spend'] for r in results):.2f}")
+    print("  Score is gated on acc MIN, not acc mean — a rung with a 93% mean and an 87% min "
+          "scores 0.")
+
+
+print("Ablation ladder defined — 9 rungs, one variable each. Run the next cell.")
+
+# %%
+LADDER = freeze_result("ladder", run_ladder)
+print()
+print_ladder(LADDER)
+
+# %% [markdown]
+# ### 🧭 Decision log — grade the router, not just the pipeline
+#
+# `triage()` is an LLM making a decision that **gates accuracy for every contract downstream**, and
+# nothing in the lab checks whether it is any good. That is the same blind spot `01_evals` closes by
+# grading the grader: an unevaluated component in the critical path is an assumption wearing the
+# costume of a measurement.
+#
+# Two things make this eval worth doing carefully:
+#
+# **1. The label is not obvious, so measure it two ways.** The tempting move is to hand-label which
+# contracts "look hard" and score triage against that. But the router's actual job is not to identify
+# hard contracts — it is to identify **contracts the cheap model would get wrong**. Those are different
+# sets, and only the second one costs you the gate. So this cell reports both:
+#
+# - **Rubric labels** — my a-priori reading against `TRIAGE_SYSTEM`'s own stated criteria.
+# - **Empirical labels** — measured. Run the extraction on Haiku k times; any contract Haiku does not
+#   get perfectly right on *every* run is one that must be routed away from Haiku. This is the label
+#   that actually matters, and it can only be obtained by running the thing.
+#
+# **2. The two error directions are not equal, so never report one accuracy number.**
+#
+# | Error | What happens | Cost |
+# |---|---|---|
+# | **False ROUTINE** | a hard contract goes to Haiku | wrong fields → **the accuracy gate**, and it is invisible until the gate fails |
+# | **False COMPLEX** | an easy contract goes to Sonnet/Opus | a fraction of a cent |
+#
+# These differ by orders of magnitude, so a single "triage is 83% accurate" is close to meaningless.
+# `triage()` already encodes this asymmetry — an unparseable verdict defaults to `COMPLEX`, failing
+# toward accuracy and away from savings. Worth naming as a deliberate design decision rather than a
+# default: **when the two errors are asymmetric, the fail-safe direction is part of the design, not an
+# implementation detail.** The demo run earlier routed 4 of 6 to COMPLEX, which is exactly this bias
+# showing up as money rather than as risk.
+
+# %%
+# Rubric labels — my a-priori read against TRIAGE_SYSTEM's own stated criteria.
+# (An amendment modifying earlier terms · conflicting clauses · unusual or uncapped
+#  indemnities · liability terms that are ambiguous or implied rather than stated.)
+TRIAGE_RUBRIC_LABELS = {
+    "C-101": "ROUTINE",   # plain MSA, cap stated plainly, assignment free
+    "C-102": "ROUTINE",   # fixed term, cap stated plainly, assignment free
+    "C-103": "COMPLEX",   # "greater of ... provided the cap shall in no event exceed" — self-conflicting
+    "C-104": "COMPLEX",   # uncapped indemnities + cap absent by SILENCE, not by statement
+    "C-105": "COMPLEX",   # Amendment No. 2 deletes the cap clause outright
+    "C-106": "ROUTINE",   # no cap, but plainly STATED (all caps) — not ambiguous, just oddly placed
+}
+
+TRIAGE_K = 3   # triage is ~$0.0008/contract; repeating it is essentially free
+
+
+def empirical_routing_labels(k: int = 3):
+    """The label that actually matters: does the CHEAP model get this contract right, every time?
+
+    A contract Haiku nails on all k runs is safely ROUTINE. Anything else must be COMPLEX,
+    regardless of whether it 'looks' hard to a human.
+    """
+    with with_config(**{**V0_CONFIG, "structured_single_pass": True, "max_tokens": 1000,
+                        "cache_playbook": True, "routine_model": MODEL_HAIKU,
+                        "complex_model": MODEL_HAIKU, "derive_risk_tier": False}):
+        rep = run_portfolio_k(clausescan_v1, k=k)
+    labels, detail = {}, {}
+    for c in CONTRACTS:
+        per_run = []
+        for r in rep["runs"]:
+            row = next((x for x in r["rows"] if x["id"] == c["id"]), None)
+            per_run.append(0 if not row or row.get("error") else row["n_correct"])
+        labels[c["id"]] = "ROUTINE" if all(n == 5 for n in per_run) else "COMPLEX"
+        detail[c["id"]] = per_run
+    return labels, detail, rep
+
+
+def eval_triage(k: int = TRIAGE_K):
+    """Run triage k times per contract; report stability, accuracy vs both label sets,
+    and — the part that matters — the DIRECTION of every error."""
+    votes, costs = {}, 0.0
+    for c in CONTRACTS:
+        v = []
+        for _ in range(k):
+            verdict, resp = triage(c)
+            v.append(verdict)
+            costs += calculate_cost(MODEL_HAIKU, resp.usage)
+        votes[c["id"]] = v
+    return votes, costs
+
+
+def _measure_router():
+    print("Measuring the empirical routing labels (what Haiku actually gets right)...")
+    emp, detail, _ = empirical_routing_labels(k=TRIAGE_K)
+    print("Evaluating triage() itself...")
+    votes, cost = eval_triage(k=TRIAGE_K)
+    return {"empirical": emp, "detail": detail, "votes": votes, "cost": cost}
+
+
+_router = freeze_result("router_eval", _measure_router)
+EMP_LABELS, EMP_DETAIL = _router["empirical"], _router["detail"]
+TRIAGE_VOTES, TRIAGE_COST = _router["votes"], _router["cost"]
+
+rows, fn, fp = [], [], []
+for c in CONTRACTS:
+    cid = c["id"]
+    v = TRIAGE_VOTES[cid]
+    majority = max(set(v), key=v.count)
+    stable = "yes" if len(set(v)) == 1 else f"NO {v}"
+    rubric, emp = TRIAGE_RUBRIC_LABELS[cid], EMP_LABELS[cid]
+    # Error direction is judged against the EMPIRICAL label — the one with teeth.
+    if emp == "COMPLEX" and majority == "ROUTINE":
+        direction = "⛔ FALSE ROUTINE (gate risk)"; fn.append(cid)
+    elif emp == "ROUTINE" and majority == "COMPLEX":
+        direction = "💸 false COMPLEX (cost only)"; fp.append(cid)
+    else:
+        direction = "✓"
+    rows.append([cid, rubric, f"{emp}  {EMP_DETAIL[cid]}", majority, stable, direction])
+
+print()
+print(tabulate(rows, headers=["ID", "Rubric", f"Empirical (Haiku n_correct ×{TRIAGE_K})",
+                              f"triage ×{TRIAGE_K}", "Stable?", "Error direction"],
+               tablefmt="simple"))
+
+n = len(CONTRACTS)
+agree_rubric = sum(max(set(TRIAGE_VOTES[c["id"]]), key=TRIAGE_VOTES[c["id"]].count)
+                   == TRIAGE_RUBRIC_LABELS[c["id"]] for c in CONTRACTS)
+agree_emp = n - len(fn) - len(fp)
+print(f"\n  triage vs rubric labels    : {agree_rubric}/{n}")
+print(f"  triage vs empirical labels : {agree_emp}/{n}")
+print(f"  ⛔ false ROUTINE (hard contract sent to Haiku — threatens the gate): "
+      f"{len(fn)}  {fn if fn else ''}")
+print(f"  💸 false COMPLEX (easy contract sent to the expensive model — costs money): "
+      f"{len(fp)}  {fp if fp else ''}")
+print(f"  triage cost: ${TRIAGE_COST:.5f} for {n}×{TRIAGE_K} classifications "
+      f"(${TRIAGE_COST/(n*TRIAGE_K):.5f} each)")
+print("\n  Read the two error columns separately. One costs a fraction of a cent; the other "
+      "costs\n  the SLA. A single accuracy number for a router averages those together and "
+      "tells you nothing.")
+
+# %% [markdown]
+# ### 🧭 Decision log — the ladder's surprises, and the k=5 run that settles them
+#
+# Read the ladder table above before this. Four results deserve calling out, and **three of them
+# contradict the notebook's own suggested path.**
+#
+# **1. The anchor did not land on 100 — it landed on 94.** Rung 0 is v0's code, unmodified, run again.
+# It measured p50 **39.9s** against the frozen baseline's **36.0s** — an **11% swing on identical
+# code**. That is the whole argument for Stage 2 in one number: had the baseline not been frozen, that
+# swing would have silently re-anchored every score in this notebook, in the direction that flatters a
+# slow day. Treat ±6% on any score here as noise, and never quote a difference smaller than that.
+#
+# **2. Right-sizing `max_tokens` bought +9 points — essentially nothing.** The `CONFIG` comment says
+# "right-size once output is disciplined (~1000)", which reads like a cost lever. It is not. **You pay
+# for tokens generated, not tokens allocated.** Dropping the ceiling 8000 → 1000 changed cost by 0%
+# because the schema-constrained response was already ~140 tokens. `max_tokens` is a **guardrail**, not
+# a cost control — and per the truncation measurement earlier, setting it *too* tight is actively
+# dangerous. Keep it right-sized for safety; do not book it as savings.
+#
+# **3. Routing to Haiku made things WORSE: −341 points and 12% *more* expensive.** The notebook's
+# suggested path lists this as step 3. The router eval above shows why: triage classifies **4 of 6**
+# contracts COMPLEX, so you pay a Haiku triage call on every contract *and still* pay Sonnet for most
+# of them. Routing only pays when the routine share is large and the triage call is cheap relative to
+# the gap it avoids. At this sample's mix, the tax exceeds the saving. On a real 248K estate the
+# routine share is much higher — so this is a finding about *this corpus*, not a verdict on routing.
+# Which is exactly why you measure instead of assuming.
+#
+# **4. Rungs 6–8 are confounded, so the ladder cannot settle them.** A cumulative ladder is the right
+# tool for "does adding X help *given everything below it*" — but rungs 7 and 8 sit on top of rung 6's
+# routing regression, so their deltas mix two effects. The ladder did its job by *finding* the
+# regression; it is the wrong instrument for pricing what sits above it.
+#
+# So the finalists below re-test the top configuration at **k=5**, each varying one thing from the same
+# base (rung 5 — the ladder's actual peak), with routing dropped:
+#
+# | | Base = structured · max_tokens 1000 · cached · Sonnet · effort=low |
+# |---|---|
+# | **F1** | base |
+# | **F2** | + `derive_risk_tier` |
+# | **F3** | + `parallel_workers=4` |
+# | **F4** | + both |
+# | **F5** | + `triage_routing` — routing re-tested cleanly, off the confounded rung |
+# | **F6** | + `drop_evidence` — **priced, not adopted.** See the note below the results. |
+
+# %%
+BASE_FINALIST = {**V0_CONFIG,
+                 "structured_single_pass": True, "max_tokens": 1000,
+                 "cache_playbook": True,
+                 "routine_model": MODEL_SONNET, "complex_model": MODEL_SONNET,
+                 "effort": "low"}
+
+FINALISTS = [
+    ("F1 · base (ladder rung 5)",      {}),
+    ("F2 · + derive risk_tier",        {"derive_risk_tier": True}),
+    ("F3 · + parallel x4",             {"parallel_workers": 4}),
+    ("F4 · + both",                    {"derive_risk_tier": True, "parallel_workers": 4}),
+    ("F5 · + triage routing",          {"triage_routing": True, "routine_model": MODEL_HAIKU}),
+    ("F6 · + drop evidence",           {"drop_evidence": True}),
+]
+
+FINALIST_K = 5
+
+
+def run_finalists(finalists=FINALISTS, k=FINALIST_K):
+    """Each finalist varies ONE thing from the SAME base — not cumulative. That is the
+    difference between a ladder (does X help given everything below?) and a fan
+    (what does X cost on its own?). Both are useful; confusing them is not."""
+    out = []
+    for label, delta in finalists:
+        with with_config(**{**BASE_FINALIST, **delta}):
+            rep = run_portfolio_k(clausescan_v1, k=k, workers=CONFIG["parallel_workers"])
+        score = (0 if rep["acc_min"] < 0.90 else
+                 round(50 * BASELINE["cost_per_contract"] / max(rep["cost_per_contract"], 1e-9)
+                       + 50 * BASELINE["p50_s"] / max(rep["p50_s"], 1e-9)))
+        out.append({"label": label, "score": score, "k": k,
+                    "acc_mean": rep["acc_mean"], "acc_min": rep["acc_min"],
+                    "acc_stdev": rep["acc_stdev"], "passk": rep["passk_accuracy"],
+                    "p50_s": rep["p50_s"], "cost_per_contract": rep["cost_per_contract"],
+                    "total_cost": rep["total_cost"], "n_errors": rep["n_errors"],
+                    "wall": statistics.median(r["wall_s"] for r in rep["runs"])})
+        print(f"{label:30s} score {score:>5}  acc {rep['acc_mean']*100:5.1f}% "
+              f"(min {rep['acc_min']*100:5.1f}%, pass^k {rep['passk_accuracy']*100:5.1f}%)  "
+              f"p50 {rep['p50_s']:4.1f}s  ${rep['cost_per_contract']:.4f}", flush=True)
+    return out
+
+
+print(f"Finalists at k={FINALIST_K} ({len(FINALISTS)} configs, one variable each)...")
+FINAL = freeze_result("finalists", run_finalists)
+
+print()
+print(tabulate(
+    [[f["label"], f["score"],
+      f"{f['acc_mean']*100:.1f}%", f"{f['acc_min']*100:.1f}%",
+      f"{f['acc_stdev']*100:.1f}pp", f"{f['passk']*100:.1f}%",
+      f"{f['p50_s']:.1f}s", f"{f['wall']:.0f}s",
+      f"${f['cost_per_contract']:.4f}", f["n_errors"]] for f in FINAL],
+    headers=["Finalist", "Score", "acc mean", "acc min", "acc sd", "pass^k",
+             "p50", "wall", "$/contract", "errs"], tablefmt="simple"))
+print(f"\n  Total finalist spend: "
+      f"${sum(f['total_cost'] for f in FINAL):.2f}  (k={FINALIST_K} each)")
+
+best = max(FINAL, key=lambda f: f["score"])
+print(f"  Highest score: {best['label']} at {best['score']}")
+f6 = next((f for f in FINAL if "drop evidence" in f["label"]), None)
+f1 = FINAL[0]
+if f6:
+    saving = (1 - f6["cost_per_contract"] / f1["cost_per_contract"]) * 100
+    print(f"  Price of the audit trail: dropping `evidence` saves {saving:.0f}% "
+          f"(+{f6['score'] - f1['score']} points). Priced, not adopted — see below.")
 
 # %% [markdown]
 # **Iterate.** Suggested path — but find your own; the leaderboard rewards imagination:
@@ -1325,6 +2121,116 @@ my_report = run_scorecard(clausescan_v1)
 # When you think you're done: the holdout. Two contracts your pipeline has never seen — because
 # an optimization that only works on the sample is called overfitting in our line of work, and
 # a finding in the client's.
+
+# %% [markdown]
+# ### 🧭 Decision log — reading the fan, and the router eval that inverts the exercise
+#
+# **The router eval is the finding.** `triage()` is an LLM making a decision that gates
+# accuracy, and nothing in the lab checks whether it is any good. Graded two ways:
+#
+# | | agreement |
+# |---|---|
+# | `triage()` vs my **rubric** labels (a-priori, from `TRIAGE_SYSTEM`'s own stated criteria) | **5/6** |
+# | `triage()` vs the **empirical** labels (did Haiku actually get 5/5, on all 3 runs?) | **3/6** |
+#
+# The rubric score flatters it. The empirical score is the one with teeth, and by that measure
+# the router is wrong half the time — because the premise underneath it is wrong. C-103
+# (self-conflicting cap), C-104 (cap absent by silence), C-105 (an amendment deleting the cap)
+# are the exercise's designed traps for a cheap model. **Haiku scored 5/5 on all three, on
+# every run.** Its only miss anywhere was C-106 — which the rubric called ROUTINE.
+#
+# So the trap contracts no longer trap. The fixture encodes an assumption about model
+# capability that has aged out, and the lever built on top of that assumption has nothing left
+# to sell *on this corpus*.
+#
+# **Error direction is the part worth keeping.** 0 ⛔ false ROUTINE, 3 💸 false COMPLEX. The
+# `except → COMPLEX` default in `triage()` fails toward accuracy, and every error it made landed
+# on the expensive side. That is the design working: a false ROUTINE costs the SLA, a false
+# COMPLEX costs $0.0008. A single accuracy number for a router averages those together and tells
+# you nothing — which is why the table above reports them in separate columns.
+#
+# Note also that C-101 came back `COMPLEX, ROUTINE, ROUTINE` across three runs. **The router is
+# itself nondeterministic**, and a majority vote hides that. A one-shot router eval would have
+# called it stable.
+#
+# This explains ladder rung 6 exactly (−311 points, +12% cost): triage routes 4 of 6 to the
+# expensive lane, 3 of them needlessly, so you pay the triage tax *and* the Sonnet price. The
+# conclusion is **not** "routing is bad" — it is "routing pays only when the cheap model actually
+# fails." On an estate where Haiku missed 30%, this measurement inverts. Ship the measurement,
+# not the folklore.
+#
+# ---
+#
+# **Reading the finalist fan.** Six configs, one variable each off a shared base, k=5:
+#
+# - F1 2381 · F2 2338 · **F3 2384** · F4 2280 · F5 2283 — a 104-point spread, ≈4%.
+# - The rung-0 anchor moved **94 → 98 across two runs of byte-identical code** — ≈4% on its own.
+#
+# So F1–F5 are **one indistinguishable cluster**. Picking a winner by score inside that band is
+# reading noise and calling it a result. F6 is the only real separation: **2974, −20% cost**.
+#
+# **`derive_risk_tier` scored *lower* both times it appeared** (F2 vs F1, F4 vs F3). Inside the
+# noise band, so not a refutation — but there is no measured support for it, and there is an
+# argument against that the ladder cannot see: **deriving a field couples its error to its
+# inputs.** Independent errors spread thinly across contracts; coupled errors cluster. A contract
+# that gets `change_of_control` wrong now loses `risk_tier` too — two field misses instead of
+# one, on a gate that is scored per contract. Shipping it **off**, against my own prior.
+#
+# **The gate never bound.** `acc sd = 0.0pp` at k=5 on every config, `pass^k = 100%` throughout.
+# 30 checks is a saturated sample: every difference above is cost and latency, not quality. The
+# honest statement of what this ladder proves is "no config degraded accuracy on six contracts" —
+# not "accuracy is safe at 248,000."
+#
+# **F6 · drop `evidence` — priced, not adopted.** It is the highest score on the board: −20%
+# cost, +593 points, gate untouched, because `evidence` is required by the schema and *not
+# graded*. It is also the audit trail; the playbook has reviewers spot-check 10% of output
+# against source text. The leaderboard rewards deleting the deliverable. **Keeping it, and
+# leaving 593 points on the board on purpose** — that number is the price of the audit trail, and
+# now it is a number the client can decide about instead of a thing that quietly went missing.
+#
+# **Final config = F3.** Not because 2384 beat 2381 — that gap is noise — but because parallel
+# workers are the one difference in the cluster that is *not* noise: **wall-clock 21s → 10s at
+# identical accuracy and identical p50.** Chosen for the clock the analyst actually experiences,
+# with the score treated as a tie.
+
+# %%
+# ── FROZEN. No tuning past this line — that is the entire point of the holdout. ──────────
+FINAL_CONFIG = {
+    "triage_routing": False,                 # measured: −311 pts on this corpus (see log above)
+    "routine_model": MODEL_SONNET,
+    "complex_model": MODEL_SONNET,
+    "cache_playbook": True,
+    "structured_single_pass": True,
+    "max_tokens": 1000,                      # guardrail, not a cost lever — rung 2 bought +8
+    "effort": "low",
+    "parallel_workers": 4,                   # wall-clock 21s → 10s; the only non-noise delta
+    "derive_risk_tier": False,               # error-coupling argument; see log above
+    "drop_evidence": False,                  # 593 points left on the board, deliberately
+}
+
+# `my_report` is NOT a fresh measurement. It is the F3 row from the frozen k=5 finalist fan —
+# the same numbers the decision above was made from. Re-measuring here would quietly re-roll
+# the dice and put a different number on the slide than the one that justified the choice.
+_f3 = next(f for f in FINAL if f["label"].startswith("F3"))
+my_report = {
+    # acc_min, not acc_mean: the slide inherits the same conservative statistic the gate used.
+    "accuracy": _f3["acc_min"],
+    "p50_s": _f3["p50_s"],
+    "cost_per_contract": _f3["cost_per_contract"],
+    "k": _f3["k"],
+}
+
+print("CONFIG frozen →", json.dumps({k: str(v) for k, v in FINAL_CONFIG.items()}, indent=2))
+print(f"\n  Final config measured at k={my_report['k']} on the 6-contract sample:")
+print(f"    accuracy (min over k) {my_report['accuracy']*100:.0f}%   ·   "
+      f"p50 {my_report['p50_s']:.1f}s   ·   ${my_report['cost_per_contract']:.4f}/contract")
+print(f"  📋 leaderboard line →  SCORE {_f3['score']} · acc {my_report['accuracy']*100:.0f}% · "
+      f"p50 {my_report['p50_s']:.1f}s · ${my_report['cost_per_contract']:.4f}/contract · "
+      f"levers: schema-1pass+cache+sonnet+effort-low+parallel-x4")
+print("\n  SLA: p50 ≤ 5s → "
+      f"{'PASS' if my_report['p50_s'] <= 5 else 'FAIL'}   ·   accuracy ≥ 90% → "
+      f"{'PASS' if my_report['accuracy'] >= 0.90 else 'FAIL'}   ·   COGS ≤ $0.02 → "
+      f"{'PASS' if my_report['cost_per_contract'] <= 0.02 else 'FAIL'}")
 
 # %%
 HOLDOUT_CONTRACTS = [
@@ -1361,13 +2267,246 @@ HOLDOUT_GOLD = {
               "governing_law": "Singapore", "risk_tier": "MEDIUM"},
 }
 
-RUN_HOLDOUT = False  # flip to True when your CONFIG is final
+RUN_HOLDOUT = True    # CONFIG is frozen above; the holdout is now legal to run
+HOLDOUT_K = 5         # 2 contracts × 5 fields = 10 checks. One miss IS exactly 90%.
+
+
+def _measure_holdout():
+    with with_config(**FINAL_CONFIG):
+        rep = run_portfolio_k(clausescan_v1, k=HOLDOUT_K, contracts=HOLDOUT_CONTRACTS,
+                              gold=HOLDOUT_GOLD, workers=FINAL_CONFIG["parallel_workers"])
+    keep = ("k", "acc_mean", "acc_min", "acc_max", "acc_stdev", "passk_accuracy",
+            "pass_at_k", "p50_s", "cost_per_contract", "total_cost", "n_errors", "n_checks")
+    return {k: rep[k] for k in keep}
+
+
 if RUN_HOLDOUT:
-    run_scorecard(clausescan_v1, label="clausescan_v1 — HOLDOUT",
-                  contracts=HOLDOUT_CONTRACTS, gold=HOLDOUT_GOLD)
+    HOLDOUT = freeze_result("holdout", _measure_holdout)
+    print_k_report(HOLDOUT, "clausescan_v1 (FROZEN) — HOLDOUT")
+    print("\n  Resolution warning: n=10 checks. Accuracy can only take the values "
+          "100%, 90%, 80%, …\n  One miss lands exactly ON the 90% gate; two is a fail. "
+          "This holdout can tell you\n  'not obviously broken'. It cannot tell you '95%'.")
+    print("  No config was changed after seeing this. That is the only thing that makes it "
+          "a holdout.")
 else:
     print("Holdout armed. Set RUN_HOLDOUT = True when your CONFIG is final — "
           "no tuning against the holdout; that's the rule.")
+
+# %% [markdown]
+# ### 🧭 Decision log — the scale factor is an assumption, so measure it instead
+#
+# `ASSUMPTIONS["production_scale_factor"] = 8` carries more weight than any other number on the
+# slide: it multiplies the estate COGS on **both** sides, so the entire savings figure is
+# downstream of it. Its stated justification — *"input-dominated, cost scales ~linearly with
+# document length"* — is wrong in a specific and quantifiable way.
+#
+# Cost per contract is **fixed cost + variable cost**. The playbook is fixed: an 8× longer
+# contract does not come with an 8× longer playbook. Only the contract text is variable.
+# (The notebook's own commentary calls it a *"5K-token playbook"*. It measures **7,882** — and
+# the `cache_creation_input_tokens` counter from the caching lever says 7,882 too. Two
+# independent instruments agree with each other and disagree with the prose; same class of
+# error as the stale Sonnet price, found the same way.) So multiplying the whole `$/contract` by 8 inflates both sides — and it inflates the
+# **v0 side hardest**, because v0 bills that 5.5K-token playbook at full price on *both* of its
+# two calls, while the optimized pipeline reads it from cache at 0.1×. An assumption that
+# inflates the "before" more than the "after" **manufactures savings**.
+#
+# That is a testable claim, and testing it costs about a dollar. The cell below pads each
+# contract with synthetic boilerplate schedules that touch none of the five audited fields — so
+# the gold labels stay valid, the contract gets *longer*, not *different* — and re-measures both
+# pipelines on the padded corpus.
+#
+# Two honesty notes on the method. The padding is sized by characters and lands at ~6× tokens,
+# not 8×, because legal boilerplate tokenizes more efficiently than the contracts do; the cell
+# reports what was achieved rather than what was aimed at. And one measured point cannot draw a
+# curve, so the cell fits the simplest defensible shape — cost ∝ length^e — and extrapolates to
+# 8× from the measured exponent. The slide's assumption is that same shape with **e = 1.00**
+# hardcoded for both pipelines. Replacing an assumed exponent with a measured one is the whole
+# move; it is still an extrapolation, and the cell says so.
+
+# %%
+import math
+
+# Synthetic boilerplate. Deliberately touches NONE of the five audited fields: no renewal or
+# term language, no assignment or change of control, no liability or cap, no governing law or
+# jurisdiction. So padding with it leaves GOLD valid — the contract gets longer, not different.
+BOILERPLATE = [
+    "Notices under this Agreement shall be in writing and delivered by hand, by nationally "
+    "recognised overnight courier, or by electronic mail to the contact addresses recorded in "
+    "the administrative annex, and shall be deemed received on the next business day following "
+    "dispatch. Each party shall maintain a current notice contact and shall inform the other "
+    "party of any change to that contact within ten (10) business days.",
+
+    "If any provision of this Agreement is held unenforceable by a tribunal of competent "
+    "authority, that provision shall be modified to the minimum extent necessary to render it "
+    "enforceable, and the remaining provisions shall continue in full force and effect without "
+    "further action by either party.",
+
+    "Neither party shall be treated as in default for any delay or failure in performance "
+    "caused by events beyond its reasonable control, including natural disaster, epidemic, "
+    "labour disruption, utility failure, or action of a public authority, provided that the "
+    "affected party gives prompt written notice and uses commercially reasonable efforts to "
+    "resume performance.",
+
+    "This Agreement may be executed in counterparts, each of which is deemed an original and "
+    "all of which together constitute one instrument. Signatures transmitted electronically, "
+    "including by recognised electronic signature platforms, have the same effect as original "
+    "manuscript signatures.",
+
+    "Each party is an independent contractor. Nothing in this Agreement creates a partnership, "
+    "joint venture, agency, or employment relationship, and neither party has authority to bind "
+    "the other or to incur obligations on the other's behalf.",
+
+    "Confidential Information shall be marked as confidential where practicable and shall be "
+    "used solely for purposes of performance. Upon written request the receiving party shall "
+    "return or securely destroy Confidential Information in its possession and shall certify "
+    "such destruction in writing within thirty (30) days.",
+
+    "Each party shall maintain complete and accurate records relating to invoices issued and "
+    "amounts paid for a period of not less than five (5) years. On not less than twenty (20) "
+    "business days' written notice, and not more than once in any twelve-month period, either "
+    "party may have such records examined by an independent accountant.",
+
+    "Personnel and approved subcontractors performing work shall observe the receiving party's "
+    "site rules, security procedures, and code of conduct. Each party remains fully responsible "
+    "for the acts and omissions of its personnel and approved subcontractors as if they were "
+    "its own.",
+
+    "While on the other party's premises, each party's personnel shall comply with all posted "
+    "health and safety requirements, complete any required site induction, and immediately "
+    "report any incident, near miss, or unsafe condition to the site supervisor.",
+
+    "Personal data processed in connection with this Agreement shall be handled in accordance "
+    "with the data-handling annex, including access controls, encryption in transit and at "
+    "rest, documented retention schedules, and notification of any confirmed security incident "
+    "within seventy-two (72) hours of confirmation.",
+
+    "Each party shall maintain a documented business continuity and disaster recovery plan, "
+    "shall test that plan not less than annually, and shall provide a summary of the most "
+    "recent test result on reasonable written request.",
+
+    "Service reporting shall be provided monthly and shall include volumes processed, "
+    "exceptions raised, root-cause summaries for any missed commitment, and the status of "
+    "corrective actions agreed at the previous review.",
+
+    "Changes to scope, deliverables, or agreed procedures shall be documented in a written "
+    "change request, priced where applicable, and signed by an authorised representative of "
+    "each party before the change is implemented.",
+
+    "The parties shall hold a governance review not less than quarterly. Matters not resolved "
+    "at that review shall be escalated in writing, first to the respective engagement leads and "
+    "thereafter to an executive sponsor nominated by each party.",
+
+    "No failure or delay in exercising any right under this Agreement operates as a waiver of "
+    "that right, and no single or partial exercise precludes any further exercise of that or "
+    "any other right.",
+
+    "Headings are for convenience only and do not affect interpretation. References to the "
+    "singular include the plural, and the words 'including' and 'includes' are to be read "
+    "without limitation.",
+]
+
+SCHEDULE_TITLES = ["OPERATIONAL PROCEDURES", "SERVICE REPORTING AND GOVERNANCE",
+                   "CHANGE CONTROL", "SECURITY AND DATA HANDLING",
+                   "BUSINESS CONTINUITY", "GENERAL PROVISIONS"]
+
+
+def pad_contract(contract: dict, factor: int) -> dict:
+    """Pad with boilerplate schedules until the text is ~`factor`× as long."""
+    text, target = contract["text"], len(contract["text"]) * factor
+    parts, n, i = [text], len(text), 0
+    while n < target:
+        body = "\n".join(f"{j + 1}. {p}" for j, p in enumerate(BOILERPLATE))
+        block = (f"\n\nSCHEDULE {chr(65 + i)} — "
+                 f"{SCHEDULE_TITLES[i % len(SCHEDULE_TITLES)]}\n{body}")
+        parts.append(block)
+        n += len(block)
+        i += 1
+    return {**contract, "text": "".join(parts)}
+
+
+SCALE_TARGET = 8
+SCALED_CONTRACTS = [pad_contract(c, SCALE_TARGET) for c in CONTRACTS]
+
+
+def _tok(user: str, system: str = "") -> int:
+    # count_tokens rejects a whitespace-only system block, so omit it rather than pad it.
+    kw = {"system": system} if system.strip() else {}
+    return client.messages.count_tokens(
+        model=MODEL_SONNET,
+        messages=[{"role": "user", "content": user}], **kw).input_tokens
+
+
+def _measure_scale():
+    """Re-measure BOTH pipelines on the 8× corpus. Fixed vs variable cost is the whole point,
+    so v0 (playbook billed twice at full price) and the final config (playbook cached at 0.1×)
+    will not scale the same way — that difference is exactly what the slide is missing."""
+    tok_1x = statistics.mean(_tok(EXTRACT_INSTRUCTION + c["text"]) for c in CONTRACTS)
+    tok_8x = statistics.mean(_tok(EXTRACT_INSTRUCTION + c["text"]) for c in SCALED_CONTRACTS)
+    tok_playbook = _tok("x", system=PLAYBOOK) - _tok("x")
+
+    with with_config(**FINAL_CONFIG):
+        fin = run_portfolio_k(clausescan_v1, k=3, contracts=SCALED_CONTRACTS, gold=GOLD,
+                              workers=FINAL_CONFIG["parallel_workers"])
+    with with_config(**V0_CONFIG):
+        v0 = run_portfolio_k(clausescan_v0, k=1, contracts=SCALED_CONTRACTS, gold=GOLD)
+
+    keep = ("k", "acc_mean", "acc_min", "acc_stdev", "passk_accuracy", "p50_s",
+            "cost_per_contract", "total_cost", "n_errors", "n_checks")
+    return {"tok_1x": tok_1x, "tok_8x": tok_8x, "tok_playbook": tok_playbook,
+            "final": {k: fin[k] for k in keep}, "v0": {k: v0[k] for k in keep}}
+
+
+SCALE = freeze_result("scale_test", _measure_scale)
+
+# The padding targeted 8× but is sized by CHARACTERS, and legal boilerplate tokenizes more
+# efficiently per character than the contracts do — so report what was ACHIEVED, not intended.
+tok_ratio = SCALE["tok_8x"] / SCALE["tok_1x"]
+raw_v0 = SCALE["v0"]["cost_per_contract"] / BASELINE["cost_per_contract"]
+raw_fin = SCALE["final"]["cost_per_contract"] / my_report["cost_per_contract"]
+
+# One measured point per pipeline, so fit the simplest curve with a defensible shape:
+# cost ∝ length ** e.  e = 1 is exactly the slide's linear assumption; e = 0 is pure fixed
+# cost. The measured exponent is the honest replacement for the assumed one — and the
+# extrapolation to 8× is labelled as an extrapolation, because that is what it is.
+elast_v0 = math.log(raw_v0) / math.log(tok_ratio)
+elast_fin = math.log(raw_fin) / math.log(tok_ratio)
+scale_v0 = SCALE_TARGET ** elast_v0
+scale_fin = SCALE_TARGET ** elast_fin
+
+print()
+print(tabulate(
+    [["user block (instruction + contract), tokens", f"{SCALE['tok_1x']:.0f}",
+      f"{SCALE['tok_8x']:.0f}", f"{tok_ratio:.1f}×", f"target {SCALE_TARGET}×, achieved "
+      f"{tok_ratio:.1f}×"],
+     ["v0 $/contract", f"${BASELINE['cost_per_contract']:.4f}",
+      f"${SCALE['v0']['cost_per_contract']:.4f}", f"{raw_v0:.2f}×",
+      f"elasticity {elast_v0:.2f}"],
+     ["final $/contract", f"${my_report['cost_per_contract']:.4f}",
+      f"${SCALE['final']['cost_per_contract']:.4f}", f"{raw_fin:.2f}×",
+      f"elasticity {elast_fin:.2f}"],
+     ["final accuracy (min over k)", f"{my_report['accuracy']*100:.0f}%",
+      f"{SCALE['final']['acc_min']*100:.0f}%", "—", "gate holds on longer documents"],
+     ["final p50", f"{my_report['p50_s']:.1f}s", f"{SCALE['final']['p50_s']:.1f}s",
+      f"{SCALE['final']['p50_s']/max(my_report['p50_s'],1e-9):.2f}×", "SLA is 5s"]],
+    headers=["Metric", "1× (lab sample)", "padded corpus", "ratio", "note"],
+    tablefmt="simple"))
+
+print(f"\n  Fixed vs variable. The playbook measures {SCALE['tok_playbook']:,} input tokens and "
+      f"does NOT grow with the\n  contract — the notebook's own text calls it a "
+      f"\"5K-token playbook\"; `count_tokens` and the\n  `cache_creation_input_tokens` counter "
+      f"from the caching lever agree with each other, not with\n  the prose. At 1× it dwarfs the "
+      f"{SCALE['tok_1x']:.0f}-token user block; at {tok_ratio:.1f}× text it no longer does, "
+      f"which is\n  exactly why the two pipelines scale differently.")
+print(f"\n  Cost elasticity to document length (cost ∝ length**e):")
+print(f"    v0     e = {elast_v0:.2f}  →  at {SCALE_TARGET}× length, {scale_v0:.2f}× cost")
+print(f"    final  e = {elast_fin:.2f}  →  at {SCALE_TARGET}× length, {scale_fin:.2f}× cost")
+print(f"    the slide's assumption is e = 1.00 for both  →  {SCALE_TARGET:.2f}× cost")
+print(f"\n  Total scale-test spend: "
+      f"${SCALE['v0']['total_cost'] + SCALE['final']['total_cost']:.2f}")
+print("\n  Measured at one point and extrapolated by a power law — not a measurement AT 8×. "
+      "That is\n  still a large improvement on a number that had no measurement behind it at "
+      "all, and the\n  slide below prints the naive-8× version beside it so the correction is "
+      "visible.")
 
 # %% [markdown]
 # # Part 6 · The steering-committee slide
@@ -1380,25 +2519,32 @@ else:
 # %%
 ASSUMPTIONS = {
     "contracts_in_estate": 248_000,
-    "production_scale_factor": 8,   # production contracts ~8× lab-sample tokens; input-dominated
-                                    # cost scales ~linearly with document length
+    "production_scale_factor": 8,   # SHIPPED ASSUMPTION — superseded below by measurement.
+                                    # Kept so the slide can show what it would have claimed.
     "interactive_share": 0.15,      # analyst working sessions (full price, streamed)
     "batch_share": 0.85,            # overnight Batch API backfill (50% off)
     "fee_per_contract": 0.75,       # what HELVETICA bills per reviewed contract
 }
 
 
-def steering_committee_slide(baseline: dict, optimized: dict, a=ASSUMPTIONS):
-    n, scale = a["contracts_in_estate"], a["production_scale_factor"]
+def estate_cogs(cpc: float, scale: float, two_speed: bool, a=ASSUMPTIONS) -> float:
+    per = cpc * scale
+    if two_speed:
+        per = per * a["interactive_share"] + per * a["batch_share"] * BATCH_DISCOUNT
+    return per * a["contracts_in_estate"]
 
-    def estate_cogs(cpc, two_speed: bool):
-        per = cpc * scale
-        if two_speed:
-            per = per * a["interactive_share"] + per * a["batch_share"] * BATCH_DISCOUNT
-        return per * n
 
-    before = estate_cogs(baseline["cost_per_contract"], two_speed=False)
-    after = estate_cogs(optimized["cost_per_contract"], two_speed=True)
+def steering_committee_slide(baseline: dict, optimized: dict, a=ASSUMPTIONS,
+                             scale_before: float = None, scale_after: float = None):
+    """scale_before / scale_after default to the shipped flat assumption. Pass the MEASURED
+    factors to get a benefits case that survives being asked 'how do you know?'."""
+    n = a["contracts_in_estate"]
+    sb = a["production_scale_factor"] if scale_before is None else scale_before
+    sa = a["production_scale_factor"] if scale_after is None else scale_after
+    measured = scale_before is not None or scale_after is not None
+
+    before = estate_cogs(baseline["cost_per_contract"], sb, two_speed=False, a=a)
+    after = estate_cogs(optimized["cost_per_contract"], sa, two_speed=True, a=a)
     revenue = n * a["fee_per_contract"]
 
     rows = [
@@ -1409,6 +2555,8 @@ def steering_committee_slide(baseline: dict, optimized: dict, a=ASSUMPTIONS):
         ["Lab cost / contract", f"${baseline['cost_per_contract']:.4f}",
          f"${optimized['cost_per_contract']:.4f}",
          f"{baseline['cost_per_contract']/max(optimized['cost_per_contract'],1e-9):.1f}× cheaper"],
+        ["Doc-length scale factor @8×", f"{sb:.2f}×", f"{sa:.2f}×",
+         "measured elasticity" if measured else "ASSUMED"],
         ["Estate COGS (248K docs)", f"${before:,.0f}", f"${after:,.0f}",
          f"${before-after:,.0f} saved"],
         ["Engagement margin", f"{(revenue-before)/revenue*100:.0f}%",
@@ -1420,12 +2568,47 @@ def steering_committee_slide(baseline: dict, optimized: dict, a=ASSUMPTIONS):
     print("PROJECT HELVETICA — Inference optimization: before / after")
     print(tabulate(rows, headers=["Metric", "v0 (inherited)", "Optimized", "Delta"],
                    tablefmt="grid"))
-    print("\nAssumptions: " + ", ".join(f"{k}={v}" for k, v in a.items()))
-    print("Production COGS modeled as lab $/contract × scale factor; optimized lane split "
-          f"{a['interactive_share']:.0%} interactive / {a['batch_share']:.0%} batch at 50% off.")
+    return before, after
 
 
-steering_committee_slide(BASELINE, my_report)
+# ── The slide, on measured scale factors ────────────────────────────────────────────────
+before, after = steering_committee_slide(BASELINE, my_report,
+                                         scale_before=scale_v0, scale_after=scale_fin)
+
+# ── What the shipped flat 8× assumption would have claimed ──────────────────────────────
+naive_before = estate_cogs(BASELINE["cost_per_contract"], 8, two_speed=False)
+naive_after = estate_cogs(my_report["cost_per_contract"], 8, two_speed=True)
+
+print()
+print(tabulate(
+    [["Estate COGS before", f"${naive_before:,.0f}", f"${before:,.0f}",
+      f"{(before/naive_before - 1)*100:+.0f}%"],
+     ["Estate COGS after", f"${naive_after:,.0f}", f"${after:,.0f}",
+      f"{(after/naive_after - 1)*100:+.0f}%"],
+     ["Headline saving", f"${naive_before-naive_after:,.0f}", f"${before-after:,.0f}",
+      f"{((before-after)/(naive_before-naive_after) - 1)*100:+.0f}%"]],
+    headers=["Sensitivity", "flat 8× (shipped assumption)", "measured", "correction"],
+    tablefmt="simple"))
+
+print("\nStated assumptions")
+print(f"  · contracts_in_estate = {ASSUMPTIONS['contracts_in_estate']:,} "
+      f"(client-provided, not verified here)")
+print(f"  · scale factors {scale_v0:.2f}× (v0) / {scale_fin:.2f}× (optimized) at 8× document "
+      f"length —\n    extrapolated from MEASURED cost elasticities (e={elast_v0:.2f} / "
+      f"{elast_fin:.2f}) on a padded corpus,\n    not assumed. They differ because v0 re-bills a "
+      f"fixed {SCALE['tok_playbook']:,}-token playbook at full\n    price on both calls while the "
+      f"optimized path reads it from cache at 0.1×; a fixed cost does\n    not scale with document "
+      f"length, so one flat multiplier cannot serve both pipelines.")
+print(f"  · lane split {ASSUMPTIONS['interactive_share']:.0%} interactive / "
+      f"{ASSUMPTIONS['batch_share']:.0%} batch at 50% off — a PLANNED split, not an observed one")
+print(f"  · fee_per_contract = ${ASSUMPTIONS['fee_per_contract']:.2f} (commercial input)")
+print(f"  · pricing verified {PRICING_VERIFIED_ON} against {PRICING_SOURCE}")
+print(f"  · accuracy quoted is the MINIMUM over k={my_report['k']} runs, not the mean; "
+      f"holdout n=10 checks")
+print("\n  Not evidenced by this lab: that 6 sample contracts + 2 holdout contracts represent "
+      "248,000\n  documents. Every accuracy claim above is bounded by that sample, and no "
+      "amount of\n  k-repetition fixes it. The next real step is a stratified sample of the "
+      "actual estate.")
 
 # %% [markdown]
 # # Wrap-up — the levers, as a client checklist
